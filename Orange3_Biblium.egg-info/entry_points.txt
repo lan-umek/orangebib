@@ -1,5 +1,0 @@
-[orange.widgets]
-Biblium = orangebib.widgets
-
-[orange3.addon]
-Biblium = orangebib
