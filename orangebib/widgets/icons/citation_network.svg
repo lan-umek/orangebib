@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+  <!-- Citation network with main path -->
+  <defs>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A90D9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2E5C8A;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background connections (light) -->
+  <line x1="12" y1="36" x2="24" y2="24" stroke="#ccc" stroke-width="1.5"/>
+  <line x1="36" y1="36" x2="24" y2="24" stroke="#ccc" stroke-width="1.5"/>
+  <line x1="24" y1="24" x2="24" y2="12" stroke="#ccc" stroke-width="1.5"/>
+  <line x1="8" y1="24" x2="24" y2="24" stroke="#ccc" stroke-width="1.5"/>
+  <line x1="40" y1="24" x2="24" y2="24" stroke="#ccc" stroke-width="1.5"/>
+  
+  <!-- Main path (highlighted) -->
+  <line x1="12" y1="36" x2="24" y2="24" stroke="#E74C3C" stroke-width="3"/>
+  <line x1="24" y1="24" x2="24" y2="12" stroke="#E74C3C" stroke-width="3"/>
+  
+  <!-- Arrow heads on main path -->
+  <polygon points="24,14 22,18 26,18" fill="#E74C3C"/>
+  <polygon points="22,26 18,28 20,24" fill="#E74C3C" transform="rotate(-45 20 26)"/>
+  
+  <!-- Nodes -->
+  <circle cx="24" cy="12" r="5" fill="url(#nodeGrad)" stroke="#2E5C8A" stroke-width="1"/>
+  <circle cx="24" cy="24" r="6" fill="url(#nodeGrad)" stroke="#2E5C8A" stroke-width="1"/>
+  <circle cx="12" cy="36" r="5" fill="url(#nodeGrad)" stroke="#2E5C8A" stroke-width="1"/>
+  <circle cx="36" cy="36" r="4" fill="#888" stroke="#666" stroke-width="1"/>
+  <circle cx="8" cy="24" r="4" fill="#888" stroke="#666" stroke-width="1"/>
+  <circle cx="40" cy="24" r="4" fill="#888" stroke="#666" stroke-width="1"/>
+  
+  <!-- Document icon in center node -->
+  <rect x="21" y="21" width="6" height="6" fill="white" rx="0.5"/>
+  <line x1="22" y1="23" x2="26" y2="23" stroke="#2E5C8A" stroke-width="0.5"/>
+  <line x1="22" y1="24.5" x2="26" y2="24.5" stroke="#2E5C8A" stroke-width="0.5"/>
+  <line x1="22" y1="26" x2="25" y2="26" stroke="#2E5C8A" stroke-width="0.5"/>
+</svg>

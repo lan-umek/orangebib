@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- Background quadrants -->
+  <rect x="4" y="4" width="18" height="18" fill="#e8f5e9" stroke="#c8e6c9" stroke-width="1"/>
+  <rect x="26" y="4" width="18" height="18" fill="#e3f2fd" stroke="#bbdefb" stroke-width="1"/>
+  <rect x="4" y="26" width="18" height="18" fill="#fafafa" stroke="#eeeeee" stroke-width="1"/>
+  <rect x="26" y="26" width="18" height="18" fill="#fff3e0" stroke="#ffe0b2" stroke-width="1"/>
+  
+  <!-- Axes -->
+  <line x1="4" y1="24" x2="44" y2="24" stroke="#9e9e9e" stroke-width="1.5"/>
+  <line x1="24" y1="4" x2="24" y2="44" stroke="#9e9e9e" stroke-width="1.5"/>
+  
+  <!-- Bubbles (themes) -->
+  <!-- Motor theme (top-right) -->
+  <circle cx="35" cy="12" r="6" fill="#4a90d9" opacity="0.8"/>
+  <circle cx="32" cy="15" r="3" fill="#4a90d9" opacity="0.6"/>
+  
+  <!-- Niche theme (top-left) -->
+  <circle cx="12" cy="10" r="4" fill="#17a2b8" opacity="0.8"/>
+  
+  <!-- Basic theme (bottom-right) -->
+  <circle cx="36" cy="34" r="5" fill="#fd7e14" opacity="0.8"/>
+  <circle cx="30" cy="38" r="3" fill="#fd7e14" opacity="0.6"/>
+  
+  <!-- Emerging theme (bottom-left) -->
+  <circle cx="10" cy="35" r="3" fill="#6c757d" opacity="0.7"/>
+  <circle cx="16" cy="32" r="2" fill="#6c757d" opacity="0.5"/>
+  
+  <!-- Axis labels -->
+  <text x="44" y="26" font-size="4" fill="#666" text-anchor="end">C</text>
+  <text x="26" y="6" font-size="4" fill="#666">D</text>
+</svg>
