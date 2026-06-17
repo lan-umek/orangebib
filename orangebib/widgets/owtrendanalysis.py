@@ -11,21 +11,17 @@ Supports:
 - Growth rate computation
 """
 
-import os
 import logging
-from typing import Optional, List, Any
-import datetime
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QFrame,
+    QHBoxLayout, QGridLayout, QLabel, QComboBox,
+    QPushButton, QSpinBox, QCheckBox, QTableWidget,
+    QTableWidgetItem,
 )
-from AnyQt.QtCore import Qt
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -34,7 +30,6 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 # Try to import biblium
 try:
-    import biblium
     from biblium import utilsbib
     HAS_BIBLIUM = True
 except ImportError:
@@ -88,7 +83,7 @@ class OWTrendAnalysis(OWWidget):
     name = "Trend Analysis"
     description = "Analyze temporal patterns and trends in your data"
     icon = "icons/trend_analysis.svg"
-    priority = 60
+    priority = 200
     keywords = ["trend", "production", "temporal", "time", "growth", "yearly"]
     category = "Biblium"
     

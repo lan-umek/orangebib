@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+  <line x1="8" y1="40" x2="42" y2="40" stroke="#404040" stroke-width="1.5"/>
+  <path d="M9 34 Q18 30 24 32 T41 22" fill="none" stroke="#555555" stroke-width="2"/>
+  <path d="M9 38 Q18 36 24 30 T41 12" fill="none" stroke="#888888" stroke-width="2"/>
+  <path d="M9 30 Q18 32 24 34 T41 33" fill="none" stroke="#aaaaaa" stroke-width="2"/>
+  <circle cx="41" cy="22" r="2.4" fill="#555555"/><circle cx="41" cy="12" r="2.4" fill="#888888"/><circle cx="41" cy="33" r="2.4" fill="#aaaaaa"/>
+</svg>

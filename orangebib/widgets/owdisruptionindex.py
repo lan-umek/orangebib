@@ -24,15 +24,15 @@ import pandas as pd
 
 from AnyQt.QtWidgets import (
     QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox, QCheckBox,
-    QTableWidget, QTableWidgetItem,
-    QTabWidget, QFrame, QProgressBar, QRadioButton, QButtonGroup,
-    QFileDialog, QMessageBox, QTextEdit, QWidget,
+    QLabel, QComboBox, QPushButton, QSpinBox, QTableWidget,
+    QTableWidgetItem, QTabWidget,
+    QProgressBar, QRadioButton, QButtonGroup, QFileDialog, QMessageBox,
+    QWidget,
 )
 from AnyQt.QtCore import Qt
 from AnyQt.QtGui import QColor
 
-from Orange.data import Table, Domain, ContinuousVariable, StringVariable, DiscreteVariable
+from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
@@ -397,7 +397,7 @@ class OWDisruptionIndex(OWWidget):
     name = "Disruption Index"
     description = "Measure whether papers consolidate or disrupt fields"
     icon = "icons/disruption_index.svg"
-    priority = 72
+    priority = 330
     keywords = ["disruption", "cd index", "consolidation", "innovation", "impact"]
     category = "Biblium"
     
@@ -973,7 +973,7 @@ class OWDisruptionIndex(OWWidget):
                 return
             
             # Check for valid values
-            valid_count = self._disruption_df['cd_index'].notna().sum()
+            self._disruption_df['cd_index'].notna().sum()
             cited_count = (self._disruption_df['n_citing'] > 0).sum()
             
             if cited_count == 0:

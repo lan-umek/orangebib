@@ -14,21 +14,17 @@ Outputs:
 - Selected documents matching selected entities
 """
 
-import os
 import logging
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Set
 from collections import Counter
-from itertools import chain
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QRadioButton, QButtonGroup,
-    QAbstractItemView,
+    QHBoxLayout, QGridLayout, QLabel, QComboBox,
+    QPushButton, QSpinBox, QCheckBox, QTableWidget,
+    QTableWidgetItem, QAbstractItemView,
 )
 from AnyQt.QtCore import Qt
 
@@ -39,7 +35,6 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 # Try to import biblium
 try:
-    import biblium
     from biblium import utilsbib
     HAS_BIBLIUM = True
 except ImportError:
@@ -156,10 +151,19 @@ ENTITY_TYPES = {
 SEPARATORS = {
     "Auto-detect": None,
     "; ": "; ",
+    ";": ";",
     "|": "|",
-    ",": ",",
     "||": "||",
+    ", ": ", ",
+    ",": ",",
 }
+
+# Candidate list separators, checked in this order (longest / space-variants
+# first so e.g. "; " wins over ";" and "||" over "|"). Bare "," is intentionally
+# excluded from list-type *detection* to avoid splitting single keywords that
+# happen to contain commas.
+LIST_SEPARATORS = ["||", "|", "; ", ";", ", "]
+AUTO_SEPARATORS = LIST_SEPARATORS + [","]
 
 
 class OWBibliometricCounts(OWWidget):
@@ -168,7 +172,7 @@ class OWBibliometricCounts(OWWidget):
     name = "Bibliometric Counts"
     description = "Count occurrences of entities (authors, keywords, sources, etc.) in bibliographic data"
     icon = "icons/bibliometric_counts.svg"
-    priority = 20
+    priority = 110
     keywords = ["count", "frequency", "authors", "keywords", "sources", "bibliometric"]
     category = "Biblium"
     
@@ -517,7 +521,7 @@ class OWBibliometricCounts(OWWidget):
         sample = sample.iloc[:100]
         sample_str = " ".join(str(s) for s in sample)
         
-        for sep in ["|", "; ", "||", ","]:
+        for sep in AUTO_SEPARATORS:
             if sep in sample_str:
                 return sep
         return None
@@ -559,9 +563,8 @@ class OWBibliometricCounts(OWWidget):
             entity_config = ENTITY_TYPES.get(self.entity_type, {})
             ct = entity_config.get("count_type", "single")
         
-        is_text = ct == "text" or (is_custom and self.count_type_override == "Text (N-grams)")
         is_list = ct == "list" or (is_custom and self.count_type_override == "Multi-Value (List)")
-        
+
         self.sep_label.setVisible(is_list or is_custom)
         self.sep_combo.setVisible(is_list or is_custom)
     
@@ -771,7 +774,7 @@ class OWBibliometricCounts(OWWidget):
         
         for val in sample:
             val_str = str(val)
-            for sep in ["|", "; ", "||"]:
+            for sep in LIST_SEPARATORS:
                 if sep in val_str:
                     return "list"
         
@@ -924,7 +927,7 @@ class OWBibliometricCounts(OWWidget):
         df = self._counts_df
         
         # Summary
-        item_col = df.columns[0]
+        df.columns[0]
         count_col = "Number of documents"
         total_items = len(df)
         total_docs = df[count_col].sum() if count_col in df.columns else 0

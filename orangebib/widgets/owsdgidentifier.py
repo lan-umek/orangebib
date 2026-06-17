@@ -11,21 +11,18 @@ according to the 17 UN Sustainable Development Goals.
 import logging
 import re
 import json
-from typing import Optional, Dict, List, Tuple, Set
+from typing import Optional, Dict, List
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QFrame, QLineEdit,
-    QFileDialog, QMessageBox, QProgressBar,
+    QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QPushButton, QGroupBox, QTableWidget, QTableWidgetItem, QTabWidget,
+    QLineEdit, QFileDialog, QMessageBox, QProgressBar,
 )
-from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QFont, QColor
+from AnyQt.QtGui import QColor
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -183,6 +180,16 @@ SDG_PERSPECTIVES = {
 }
 
 
+PILLAR_COLORS = {"People": "#E5243B", "Planet": "#3F7E44",
+                "Prosperity": "#FCC30B", "Peace": "#00689D",
+                "Partnership": "#19486A"}
+DIMENSION_COLORS = {"Environmental": "#3F7E44", "Social": "#E5243B",
+                    "Economic": "#FCC30B"}
+SDG_TO_PILLAR = {i: p for p, lst in SDG_PERSPECTIVES.items() for i in lst}
+SDG_TO_DIM = {i: d for d, lst in SDG_DIMENSIONS.items() for i in lst}
+COLOR_BY_MODES = ["SDG colours", "By pillar", "By dimension", "Uniform"]
+
+
 # =============================================================================
 # TEXT FIELD OPTIONS
 # =============================================================================
@@ -191,6 +198,7 @@ TEXT_FIELD_OPTIONS = [
     ("Abstract", ["Abstract", "AB", "abstract"]),
     ("Title", ["Title", "TI", "title", "Document Title"]),
     ("Title + Abstract", None),  # Special: combines both
+    ("Title + Abstract + Keywords", None),  # Special: title+abstract+keywords
     ("Author Keywords", ["Author Keywords", "Keywords", "DE", "author_keywords"]),
     ("Index Keywords", ["Index Keywords", "Keywords Plus", "ID", "indexed_keywords"]),
     ("Full Text", ["Full Text", "full_text", "Text", "Body"]),
@@ -287,7 +295,7 @@ class OWSDGIdentifier(OWWidget):
     name = "SDG Identifier"
     description = "Identify Sustainable Development Goals in your dataset"
     icon = "icons/sdg_identifier.svg"
-    priority = 66
+    priority = 520
     keywords = ["SDG", "sustainable", "development", "goals", "UN", "2030"]
     category = "Biblium"
     
@@ -301,6 +309,7 @@ class OWSDGIdentifier(OWWidget):
     
     # Settings
     field_index = settings.Setting(0)
+    color_by_mode = settings.Setting(0)
     include_perspectives = settings.Setting(True)
     include_dimensions = settings.Setting(True)
     add_to_dataset = settings.Setting(True)
@@ -416,12 +425,25 @@ class OWSDGIdentifier(OWWidget):
         # Results table
         results_box = QGroupBox("📊 SDG Distribution")
         results_layout = QVBoxLayout(results_box)
-        
+        crow = QHBoxLayout()
+        crow.addWidget(QLabel("Colour by:"))
+        self.color_combo = QComboBox(); self.color_combo.addItems(COLOR_BY_MODES)
+        self.color_combo.setCurrentIndex(self.color_by_mode)
+        self.color_combo.currentIndexChanged.connect(self._on_color_mode_changed)
+        crow.addWidget(self.color_combo); crow.addStretch()
+        results_layout.addLayout(crow)
+        self.results_tabs = QTabWidget()
         self.results_table = QTableWidget()
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.results_table.setSortingEnabled(True)
-        results_layout.addWidget(self.results_table)
-        
+        self.results_tabs.addTab(self.results_table, "By SDG")
+        self.pillar_table = QTableWidget()
+        self.pillar_table.setSortingEnabled(True)
+        self.results_tabs.addTab(self.pillar_table, "By pillar (5 Ps)")
+        self.dimension_table = QTableWidget()
+        self.dimension_table.setSortingEnabled(True)
+        self.results_tabs.addTab(self.dimension_table, "By dimension")
+        results_layout.addWidget(self.results_tabs)
         main_layout.addWidget(results_box)
         
         # Export button
@@ -489,13 +511,10 @@ class OWSDGIdentifier(OWWidget):
             return None
         
         name, candidates = TEXT_FIELD_OPTIONS[self.field_index]
-        
-        if name == "Title + Abstract":
-            # Will be handled specially
-            return "Title + Abstract"
-        
+
+        # combined options are handled specially via _get_text_for_row
         if candidates is None:
-            return None
+            return name
         
         for col in self._df.columns:
             if col in candidates:
@@ -508,29 +527,25 @@ class OWSDGIdentifier(OWWidget):
     
     def _get_text_for_row(self, row_idx: int, text_col: str) -> str:
         """Get text for a row, handling combined columns."""
-        if text_col == "Title + Abstract":
+        if text_col in ("Title + Abstract", "Title + Abstract + Keywords"):
+            groups = [["Title", "TI", "title", "Document Title"],
+                      ["Abstract", "AB", "abstract", "Processed Abstract"]]
+            if text_col == "Title + Abstract + Keywords":
+                groups += [["Author Keywords", "Keywords", "DE", "author_keywords"],
+                           ["Index Keywords", "Keywords Plus", "ID", "indexed_keywords"]]
             parts = []
-            
-            # Find title column
-            for col in self._df.columns:
-                if col in ["Title", "TI", "title", "Document Title"]:
-                    val = self._df.iloc[row_idx][col]
-                    if val and not pd.isna(val):
-                        parts.append(str(val))
-                    break
-            
-            # Find abstract column
-            for col in self._df.columns:
-                if col in ["Abstract", "AB", "abstract"]:
-                    val = self._df.iloc[row_idx][col]
-                    if val and not pd.isna(val):
-                        parts.append(str(val))
-                    break
-            
+            row = self._df.iloc[row_idx]
+            for cands in groups:
+                for col in cands:
+                    if col in self._df.columns:
+                        val = row[col]
+                        if val is not None and not pd.isna(val):
+                            parts.append(str(val))
+                        break
             return " ".join(parts)
         else:
             val = self._df.iloc[row_idx][text_col]
-            return str(val) if val and not pd.isna(val) else ""
+            return str(val) if val is not None and not pd.isna(val) else ""
     
     @Inputs.data
     def set_data(self, data: Optional[Table]):
@@ -584,13 +599,10 @@ class OWSDGIdentifier(OWWidget):
             return
         
         text_col = self._find_text_column()
-        if text_col is None and self.field_index != 2:  # Not "Title + Abstract"
+        if text_col is None:
             self.Error.no_field()
             self._send_outputs(None, None, None)
             return
-        
-        if text_col is None:
-            text_col = "Title + Abstract"
         
         try:
             self.progress.setVisible(True)
@@ -646,6 +658,11 @@ class OWSDGIdentifier(OWWidget):
             self.progress.setVisible(False)
             self._send_outputs(None, None, None)
     
+    def _on_color_mode_changed(self, idx):
+        self.color_by_mode = idx
+        if self._results is not None:
+            self._update_results_display()
+
     def _update_results_display(self):
         """Update the results display table."""
         if self._results is None:
@@ -678,9 +695,16 @@ class OWSDGIdentifier(OWWidget):
             count = int(self._results[col_name].sum())
             pct_sdg = count / n_total * 100 if n_total > 0 else 0
             
-            # SDG number with color - use NumericTableWidgetItem for proper sorting
+            # SDG number with colour (mode-dependent)
             sdg_item = NumericTableWidgetItem(f"SDG {i}", i)
-            color = QColor(SDG_INFO[i]["color"])
+            if self.color_by_mode == 1:
+                color = QColor(PILLAR_COLORS.get(SDG_TO_PILLAR.get(i, ""), "#888888"))
+            elif self.color_by_mode == 2:
+                color = QColor(DIMENSION_COLORS.get(SDG_TO_DIM.get(i, ""), "#888888"))
+            elif self.color_by_mode == 3:
+                color = QColor("#4a90d9")
+            else:
+                color = QColor(SDG_INFO[i]["color"])
             sdg_item.setBackground(color)
             sdg_item.setForeground(QColor("white") if color.lightness() < 128 else QColor("black"))
             self.results_table.setItem(i - 1, 0, sdg_item)
@@ -700,8 +724,34 @@ class OWSDGIdentifier(OWWidget):
         
         # Re-enable sorting
         self.results_table.setSortingEnabled(True)
+        self._populate_group_table(self.pillar_table, SDG_PERSPECTIVES, "Pillar", n_total)
+        self._populate_group_table(self.dimension_table, SDG_DIMENSIONS, "Dimension", n_total)
         self.export_btn.setEnabled(True)
     
+    def _populate_group_table(self, table, groups, label, n_total):
+        """Aggregate per-SDG presence into pillar / dimension counts: a document
+        counts if it matches ANY SDG in the group."""
+        table.setSortingEnabled(False)
+        table.clear()
+        rows = list(groups.items())
+        table.setRowCount(len(rows))
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels([label, "SDGs", "Documents", "Percentage"])
+        for r, (gname, sdgs) in enumerate(rows):
+            cols = [f"SDG{i}" for i in sdgs if f"SDG{i}" in self._results.columns]
+            if cols:
+                present = (self._results[cols].astype(float) > 0).any(axis=1)
+                count = int(present.sum())
+            else:
+                count = 0
+            pct = count / n_total * 100 if n_total > 0 else 0
+            table.setItem(r, 0, QTableWidgetItem(str(gname)))
+            table.setItem(r, 1, QTableWidgetItem(", ".join(str(i) for i in sdgs)))
+            table.setItem(r, 2, NumericTableWidgetItem(f"{count:,}", count))
+            table.setItem(r, 3, NumericTableWidgetItem(f"{pct:.1f}%", pct))
+        table.resizeColumnsToContents()
+        table.setSortingEnabled(True)
+
     def _send_outputs_from_results(self):
         """Send outputs based on computed results."""
         if self._results is None or self._data is None:

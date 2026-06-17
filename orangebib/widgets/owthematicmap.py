@@ -15,20 +15,17 @@ Quadrants:
 """
 
 import logging
-from typing import Optional, Dict, List, Tuple, Set
+from typing import Optional, Dict, List
 from collections import Counter
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QTabWidget, QFrame,
-    QTextEdit, QLineEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QComboBox, QTableWidget, QTableWidgetItem, QTabWidget,
+    QTextEdit,
 )
-from AnyQt.QtCore import Qt
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -51,8 +48,6 @@ except ImportError:
 
 # Try biblium
 try:
-    import biblium
-    from biblium import utilsbib
     HAS_BIBLIUM = True
 except ImportError:
     HAS_BIBLIUM = False
@@ -220,9 +215,6 @@ def compute_thematic_map(G: nx.Graph, partition: Dict[str, int]) -> pd.DataFrame
         label = "; ".join(top_keywords[:3])
         all_keywords = "; ".join(sorted_nodes)
         
-        # Count documents containing cluster items
-        n_documents = len(nodes)  # Approximation - actual would need original data
-        
         results.append({
             'Cluster': cluster_id,
             'Label': label,
@@ -230,6 +222,7 @@ def compute_thematic_map(G: nx.Graph, partition: Dict[str, int]) -> pd.DataFrame
             'Density': density,
             'Occurrences': total_occurrences,
             'Items': n_items,
+            'Documents': len(nodes),  # approximation; actual needs source data
             'Internal Links': internal_weight,
             'External Links': external_weight,
             'Keywords': all_keywords,
@@ -271,7 +264,7 @@ class OWThematicMap(OWWidget):
     name = "Thematic Map"
     description = "Strategic diagram showing research themes by centrality and density"
     icon = "icons/thematic_map.svg"
-    priority = 60
+    priority = 370
     keywords = ["thematic", "strategic", "map", "centrality", "density", "clusters", "keywords"]
     category = "Biblium"
     

@@ -12,24 +12,29 @@ whether each document matches the concept.
 import logging
 import re
 import json
-from typing import Optional, Dict, List, Tuple, Set
+from typing import Optional, Dict, List
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QFrame, QLineEdit,
-    QListWidget, QListWidgetItem, QFileDialog,
+    QApplication,
+    QToolTip,
+    QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QPushButton, QGroupBox, QTableWidget, QTableWidgetItem, QTabWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QFileDialog,
     QMessageBox, QAbstractItemView,
 )
 from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QFont
 
-from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
+try:
+    import pyqtgraph as pg
+    HAS_PG = True
+except Exception:  # noqa: BLE001
+    HAS_PG = False
+
+from Orange.data import Table, Domain, DiscreteVariable
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
@@ -47,7 +52,12 @@ TEXT_FIELD_OPTIONS = [
     ("Title", ["Title", "TI", "title", "Document Title"]),
     ("Author Keywords", ["Author Keywords", "Keywords", "DE", "author_keywords"]),
     ("Index Keywords", ["Index Keywords", "Keywords Plus", "ID", "indexed_keywords"]),
-    ("Processed Text", ["Processed Text", "processed_text", "Text"]),
+    ("Processed Text", ["Processed Combined Text", "Processed Abstract",
+                        "Processed Document Title", "Processed Title",
+                        "Processed Author and Index Keywords",
+                        "Processed Author Keywords", "Processed Index Keywords",
+                        "Processed TI", "Processed Text", "processed_text",
+                        "Text"]),
 ]
 
 # Auto-detect priority
@@ -100,7 +110,19 @@ def matches_concept(text: str, keywords: List[str], use_regex: bool = False) -> 
     Returns:
         True if any keyword matches
     """
-    if not text or pd.isna(text):
+    if isinstance(text, (list, tuple)):
+        text = " ".join(str(t) for t in text)
+    elif hasattr(text, "tolist") and not isinstance(text, str):
+        try:
+            text = " ".join(str(t) for t in text.tolist())
+        except Exception:
+            text = str(text)
+    try:
+        if text is None or (not isinstance(text, str) and pd.isna(text)):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if not text:
         return False
     
     text = str(text).lower()
@@ -154,7 +176,7 @@ class OWConceptBuilder(OWWidget):
     name = "Concept Builder"
     description = "Create binary concept variables from keywords"
     icon = "icons/concept_builder.svg"
-    priority = 65
+    priority = 350
     keywords = ["concept", "keyword", "binary", "variable", "text", "search"]
     category = "Biblium"
     
@@ -164,6 +186,7 @@ class OWConceptBuilder(OWWidget):
     class Outputs:
         data = Output("Data", Table, doc="Data with concept variables")
         concept_matches = Output("Concept Matches", Table, doc="Documents matching any concept")
+        selected = Output("Selected Documents", Table, doc="Docs for the clicked concept / overlap cell")
     
     # Settings
     field_index = settings.Setting(0)
@@ -352,8 +375,154 @@ class OWConceptBuilder(OWWidget):
         results_layout.addWidget(self.results_table)
         
         main_layout.addWidget(results_box)
-        
+
+        if HAS_PG:
+            viz_box = QGroupBox("📈 Concept charts (click a bar / cell to output documents)")
+            viz_layout = QVBoxLayout(viz_box)
+            self.viz_tabs = QTabWidget()
+            self.counts_plot = pg.PlotWidget(background="w")
+            self.counts_plot.scene().sigMouseClicked.connect(self._on_counts_clicked)
+            self.viz_tabs.addTab(self.counts_plot, "Counts")
+            self.overlap_plot = pg.PlotWidget(background="w")
+            self.overlap_img = pg.ImageItem()
+            self.overlap_plot.addItem(self.overlap_img)
+            self.overlap_plot.scene().sigMouseClicked.connect(self._on_overlap_clicked)
+            self.overlap_plot.scene().sigMouseMoved.connect(self._on_overlap_hover)
+            self.viz_tabs.addTab(self.overlap_plot, "Overlap heatmap (Jaccard)")
+            viz_layout.addWidget(self.viz_tabs)
+            main_layout.addWidget(viz_box, 1)
+
         main_layout.addStretch()
+
+    def _render_concept_charts(self, concept_data):
+        if not HAS_PG:
+            return
+        names = list(concept_data.keys())
+        counts = [int(np.sum(concept_data[n])) for n in names]
+        self._concept_names = names
+        self._concept_data = concept_data
+        # counts bar chart (horizontal)
+        self.counts_plot.clear()
+        ys = list(range(len(names)))
+        bar = pg.BarGraphItem(x0=0, y=ys, height=0.6, width=counts,
+                              brush=pg.mkBrush("#4a90d9"))
+        self.counts_plot.addItem(bar)
+        ax = self.counts_plot.getAxis("left")
+        ax.setTicks([[(i, names[i][:28]) for i in ys]])
+        self.counts_plot.setLabel("bottom", "Documents")
+        # overlap heatmap -- raw intersection counts (for selection) plus a
+        # symmetric Jaccard similarity matrix (for display).
+        n = len(names)
+        bool_cols = [concept_data[names[i]].astype(bool) for i in range(n)]
+        mat = np.zeros((n, n), dtype=int)
+        jac = np.zeros((n, n), dtype=float)
+        for i in range(n):
+            for j in range(i, n):
+                inter = int(np.sum(bool_cols[i] & bool_cols[j]))
+                mat[i, j] = mat[j, i] = inter        # symmetric counts
+                union = int(np.sum(bool_cols[i] | bool_cols[j]))
+                val = (inter / union) if union else 0.0
+                jac[i, j] = jac[j, i] = val           # symmetric Jaccard
+        self._overlap_mat = mat
+        self._overlap_jac = jac
+        # data[x=i, y=j] -> no transpose so axis labels match the matrix
+        self.overlap_img.setImage(jac, levels=(0.0, 1.0))
+        try:
+            self.overlap_img.setColorMap(pg.colormap.get("viridis"))
+        except Exception:  # noqa: BLE001
+            pass
+        bax = self.overlap_plot.getAxis("bottom")
+        lax = self.overlap_plot.getAxis("left")
+        bax.setTicks([[(i + 0.5, names[i][:14]) for i in range(n)]])
+        lax.setTicks([[(i + 0.5, names[i][:14]) for i in range(n)]])
+        self._selected_cells = set()
+        self._overlap_highlights = []
+
+    def _output_docs_for_mask(self, mask):
+        if self._data is None:
+            self.Outputs.selected.send(None)
+            return
+        idx = np.where(mask)[0].tolist()
+        self.Outputs.selected.send(self._data[idx] if idx else None)
+
+    def _on_counts_clicked(self, ev):
+        if not getattr(self, "_concept_names", None):
+            return
+        vb = self.counts_plot.getPlotItem().vb
+        p = vb.mapSceneToView(ev.scenePos())
+        i = int(round(p.y()))
+        if 0 <= i < len(self._concept_names):
+            name = self._concept_names[i]
+            self._output_docs_for_mask(self._concept_data[name].astype(bool))
+
+    def _on_overlap_clicked(self, ev):
+        if not getattr(self, "_concept_names", None):
+            return
+        vb = self.overlap_plot.getPlotItem().vb
+        p = vb.mapSceneToView(ev.scenePos())
+        col = int(np.floor(p.x())); row = int(np.floor(p.y()))
+        names = self._concept_names
+        n = len(names)
+        if not (0 <= row < n and 0 <= col < n):
+            return
+        cell = (row, col)
+        ctrl = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        if not hasattr(self, "_selected_cells"):
+            self._selected_cells = set()
+        if ctrl:
+            self._selected_cells ^= {cell}
+        else:
+            self._selected_cells = set() if self._selected_cells == {cell} else {cell}
+        self._draw_overlap_highlights()
+        # union of the intersections of all selected cells
+        if not self._selected_cells:
+            self.Outputs.selected.send(None)
+            return
+        mask = None
+        for (r, c) in self._selected_cells:
+            m = (self._concept_data[names[r]].astype(bool)
+                 & self._concept_data[names[c]].astype(bool))
+            mask = m if mask is None else (mask | m)
+        self._output_docs_for_mask(mask)
+
+    def _draw_overlap_highlights(self):
+        for it in getattr(self, "_overlap_highlights", []):
+            try:
+                self.overlap_plot.removeItem(it)
+            except Exception:  # noqa: BLE001
+                pass
+        self._overlap_highlights = []
+        for (row, col) in getattr(self, "_selected_cells", set()):
+            # outline the clicked cell (x = col, y = row), cells are 1x1
+            xs = [col, col + 1, col + 1, col, col]
+            ys = [row, row, row + 1, row + 1, row]
+            it = pg.PlotCurveItem(x=np.array(xs, dtype=float),
+                                  y=np.array(ys, dtype=float),
+                                  pen=pg.mkPen("#e67e22", width=3))
+            it.setZValue(50)
+            self.overlap_plot.addItem(it)
+            self._overlap_highlights.append(it)
+
+    def _on_overlap_hover(self, pos):
+        names = getattr(self, "_concept_names", None)
+        if not names or getattr(self, "_overlap_mat", None) is None:
+            return
+        vb = self.overlap_plot.getPlotItem().vb
+        if not self.overlap_plot.sceneBoundingRect().contains(pos):
+            self.overlap_plot.setToolTip("")
+            return
+        p = vb.mapSceneToView(pos)
+        i = int(np.floor(p.x())); j = int(np.floor(p.y()))
+        if 0 <= i < len(names) and 0 <= j < len(names):
+            inter = int(self._overlap_mat[i, j])
+            jacv = float(self._overlap_jac[i, j])
+            txt = (f"{names[i]} \u2229 {names[j]}\n"
+                   f"Documents: {inter}\nJaccard: {jacv:.3f}\n(click to output)")
+            gp = self.overlap_plot.mapToGlobal(
+                self.overlap_plot.mapFromScene(pos))
+            QToolTip.showText(gp, txt, self.overlap_plot)
+        else:
+            QToolTip.hideText()
     
     def _on_field_changed(self, index):
         self.field_index = index
@@ -480,10 +649,37 @@ class OWConceptBuilder(OWWidget):
         """Load concepts from JSON file."""
         filepath, _ = QFileDialog.getOpenFileName(
             self, "Load Concepts", "",
-            "JSON files (*.json);;Text files (*.txt);;All files (*)"
+            "All supported (*.json *.txt *.csv *.xlsx *.xls);;"
+            "JSON files (*.json);;Text files (*.txt);;"
+            "Spreadsheet (*.csv *.xlsx *.xls);;All files (*)"
         )
         
         if not filepath:
+            return
+        
+        # Spreadsheet format (My Concepts style): each column header is a
+        # concept name, the cells below it are its keywords.
+        low = filepath.lower()
+        if low.endswith(('.csv', '.xlsx', '.xls')):
+            try:
+                df = pd.read_csv(filepath) if low.endswith('.csv') \
+                    else pd.read_excel(filepath)
+                added = 0
+                for col in df.columns:
+                    kws = df[col].dropna().astype(str).str.strip().tolist()
+                    kws = [k for k in kws if k and k.lower() != 'nan']
+                    name = str(col).strip()
+                    if name and kws and not any(
+                            c.name.lower() == name.lower() for c in self._concepts):
+                        self._concepts.append(Concept(name, kws))
+                        added += 1
+                self.file_label.setText(Path(filepath).name)
+                self._save_concepts_to_settings()
+                self._update_concepts_list()
+                if self.auto_apply and self._df is not None:
+                    self.commit()
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "Load Error", f"Could not load file: {e}")
             return
         
         try:
@@ -568,12 +764,30 @@ class OWConceptBuilder(OWWidget):
                             return col
             return None
         else:
-            for col in self._df.columns:
-                if col in candidates:
-                    return col
-                for candidate in candidates:
-                    if col.lower() == candidate.lower():
-                        return col
+            # Iterate candidates in priority order (not column order) so the
+            # most comprehensive processed-text column wins.
+            cols_lower = {c.lower(): c for c in self._df.columns}
+            for candidate in candidates:
+                if candidate in self._df.columns:
+                    return candidate
+                if candidate.lower() in cols_lower:
+                    return cols_lower[candidate.lower()]
+            # Fallback for "Processed Text": match ANY processed/* column
+            # (biblium names processed columns variably), preferring the
+            # most comprehensive ("combined"/"text") one.
+            label = TEXT_FIELD_OPTIONS[self.field_index][0]
+            if label == "Processed Text":
+                proc = [c for c in self._df.columns
+                        if "processed" in str(c).lower()]
+                if proc:
+                    proc.sort(key=lambda c: ("combined" not in c.lower(),
+                                             "text" not in c.lower(), len(c)))
+                    return proc[0]
+                # last resort: any obvious text column so the widget still runs
+                for cand in ("Combined Text", "Abstract", "Title",
+                             "Author and Index Keywords", "Author Keywords"):
+                    if cand in self._df.columns:
+                        return cand
             return None
     
     @Inputs.data
@@ -650,8 +864,9 @@ class OWConceptBuilder(OWWidget):
                 concept_data[concept.name] = matches.astype(int)
                 any_match |= matches
             
-            # Update results display
+            # Update results display + charts
             self._update_results(concept_data)
+            self._render_concept_charts(concept_data)
             
             # Build output table
             output_table = self._build_output_table(concept_data)

@@ -16,12 +16,10 @@ Outputs:
 - Filtered Counts: Top-N filtered counts table
 """
 
-import os
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 from collections import Counter
 from functools import reduce
-from itertools import chain
 
 import numpy as np
 import pandas as pd
@@ -29,21 +27,19 @@ import pandas as pd
 from AnyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QRadioButton, QButtonGroup,
-    QAbstractItemView, QTabWidget, QSplitter, QFrame,
+    QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QAbstractItemView, QTabWidget,
 )
 from AnyQt.QtCore import Qt
 from AnyQt.QtGui import QColor
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
-from Orange.widgets import gui, settings
+from Orange.widgets import gui
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.settings import Setting
 
 # Try to import biblium
 try:
-    import biblium
     from biblium import utilsbib
     from biblium.bibstats import BiblioStats
     HAS_BIBLIUM = True
@@ -103,15 +99,6 @@ ENTITY_CONFIGS = {
         "count_type": "list",
         "item_label": "Keyword",
     },
-    "ca_countries": {
-        "label": "Corresponding Author Countries",
-        "method": "count_ca_countries",
-        "result_attr": "group_ca_countries_counts_df",
-        "description": "Count CA country occurrences per group",
-        "columns": ["CA Country", "Correspondence Author Country", "ca_country"],
-        "count_type": "single",
-        "item_label": "Country",
-    },
     "all_countries": {
         "label": "All Countries",
         "method": "count_all_countries",
@@ -170,7 +157,7 @@ class OWGroupCounts(OWWidget):
     name = "Group Counts"
     description = "Count and compare entity frequencies across document groups"
     icon = "icons/group_counts.svg"
-    priority = 31
+    priority = 600
     keywords = ["group", "count", "comparison", "frequency", "authors", "keywords",
                 "sources", "bibliometric", "cross-group"]
     category = "Biblium"
@@ -188,6 +175,7 @@ class OWGroupCounts(OWWidget):
     entity_type_idx = Setting(0)
     merge_type_idx = Setting(0)  # 0=all items, 1=shared items
     top_n_display = Setting(50)
+    output_long = Setting(False)
     top_n_plot = Setting(10)
     auto_apply = Setting(True)
 
@@ -267,6 +255,18 @@ class OWGroupCounts(OWWidget):
         )
         merge_layout.addWidget(self.merge_combo)
         options_box.layout().addLayout(merge_layout)
+
+        layout_row = QHBoxLayout()
+        layout_row.addWidget(QLabel("Layout:"))
+        self.layout_combo = QComboBox()
+        self.layout_combo.addItems(["Wide", "Long"])
+        self.layout_combo.setCurrentIndex(1 if self.output_long else 0)
+        self.layout_combo.setToolTip(
+            "Wide: one column per group. Long: one row per item-group pair "
+            "(Item, Group, Count).")
+        self.layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+        layout_row.addWidget(self.layout_combo)
+        options_box.layout().addLayout(layout_row)
 
         # --- Display Options ---
         display_box = gui.widgetBox(self.controlArea, "📊 Display Options")
@@ -593,18 +593,45 @@ class OWGroupCounts(OWWidget):
             return
 
         self._result_df = result_df
+        self._last_label = config.get("label", "Items")
 
         n_items = len(result_df)
         n_groups = len(self._group_names)
         self.Information.counted(f"{n_items:,}", n_groups)
 
-        # Display results
-        self._display_table(result_df, config)
+        shaped = self._shape(result_df)
+        # Display results (shaped) + per-group summary (always from wide df)
+        self._display_table(shaped, config)
+        self._display_single_summary(result_df, config)
 
         # Send outputs
-        self._send_outputs(result_df)
+        self._send_outputs(shaped)
 
         self.tab_widget.setCurrentIndex(0)
+
+    def _on_layout_changed(self, idx):
+        self.output_long = (idx == 1)
+        if self._result_df is not None:
+            shaped = self._shape(self._result_df)
+            # re-render with the previously used config label
+            cfg = {"label": getattr(self, "_last_label", "Items")}
+            self._display_table(shaped, cfg)
+            self._display_single_summary(self._result_df, cfg)
+            self._send_outputs(shaped)
+
+    @staticmethod
+    def _to_long(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty or len(df.columns) < 2:
+            return df
+        item_col = df.columns[0]
+        long_df = df.melt(id_vars=[item_col], var_name="Group",
+                          value_name="Count")
+        long_df = long_df[pd.to_numeric(long_df["Count"], errors="coerce")
+                          .fillna(0) != 0].reset_index(drop=True)
+        return long_df
+
+    def _shape(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self._to_long(df) if self.output_long else df
 
     def _count_entity(self, config: Dict, merge_type: str) -> pd.DataFrame:
         """Count entity occurrences across groups."""
@@ -884,6 +911,15 @@ class OWGroupCounts(OWWidget):
         self.results_table.setSortingEnabled(True)
         self.results_table.resizeColumnsToContents()
 
+    def _display_single_summary(self, df: pd.DataFrame, config: Dict):
+        """The Summary tab is only meaningful for 'Count All' — for a normal
+        single count we leave it empty with a short note."""
+        self.summary_table.setRowCount(0)
+        self.summary_table.setColumnCount(0)
+        self.summary_header.setText(
+            "Summary is populated only by 'Count All' (counts every entity "
+            "type across the groups). Use the Table tab for this count.")
+
     def _display_count_all_summary(
         self, results: Dict[str, pd.DataFrame], errors: List[str]
     ):
@@ -951,6 +987,21 @@ class OWGroupCounts(OWWidget):
                 return cand
             if cand.lower() in cols_lower:
                 return cols_lower[cand.lower()]
+        # substring fallback for country-type entities (e.g. corresponding-author
+        # country variants).
+        first = (candidates[0].lower() if candidates else "")
+        if "country" in first or "countr" in first:
+            corresp = any(k in first for k in ("ca ", "correspond", "reprint", "rp "))
+            # 1) prefer a corresponding-author-specific country column
+            if corresp:
+                for cl, orig in cols_lower.items():
+                    if "countr" in cl and any(
+                            k in cl for k in ("correspond", "reprint", " rp", "ca ", "ca_")):
+                        return orig
+            # 2) otherwise fall back to ANY country column so the count still runs
+            for cl, orig in cols_lower.items():
+                if "countr" in cl:
+                    return orig
         return None
 
     def _detect_separator(self, df: pd.DataFrame) -> str:

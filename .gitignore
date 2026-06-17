@@ -1,5 +1,21 @@
-*.egg-info/ 
-__pycache__/ 
-*.pyc 
-*.zip 
-*.ows 
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+docs/_build/
+.ipynb_checkpoints/
+.DS_Store
+*.qsettings
+.idea/
+.vscode/
+
+# Generated HTML widget help (built from docs/ at packaging time)
+orangebib/widgets/help/
+
+# Stray top-level artefacts (real assets live under orangebib/)
+/PA_concepts_extended.xlsx
+/widgets/
+/icons/
+tools/capture_report.txt

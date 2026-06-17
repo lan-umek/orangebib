@@ -14,7 +14,7 @@ Features:
 """
 
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -22,16 +22,20 @@ import pandas as pd
 from AnyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QToolTip, QApplication,
-    QFileDialog, QSizePolicy,
+    QToolTip, QApplication, QFileDialog, QSizePolicy,
 )
 from AnyQt.QtCore import Qt, pyqtSignal, QRectF
-from AnyQt.QtGui import QFont, QColor
+from AnyQt.QtGui import QColor
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
-from Orange.widgets import gui, settings
+from Orange.widgets import gui
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.settings import Setting
+
+try:
+    from orangebib.base import group_color
+except Exception:  # noqa: BLE001
+    group_color = None
 
 logger = logging.getLogger(__name__)
 
@@ -182,10 +186,13 @@ if HAS_PYQTGRAPH:
             if colors:
                 self._group_colors = dict(colors)
             else:
-                self._group_colors = {
-                    g: GROUP_PALETTE[i % len(GROUP_PALETTE)]
-                    for i, g in enumerate(groups)
-                }
+                if group_color is not None:
+                    self._group_colors = {g: group_color(g) for g in groups}
+                else:
+                    self._group_colors = {
+                        g: GROUP_PALETTE[i % len(GROUP_PALETTE)]
+                        for i, g in enumerate(groups)
+                    }
 
             # Bar geometry
             bar_height = 0.8 / n_groups
@@ -400,7 +407,7 @@ class OWGroupCountsPlot(OWWidget):
     description = ("Interactive horizontal bar chart comparing entity "
                     "frequencies across document groups with hover and selection")
     icon = "icons/group_counts.svg"
-    priority = 32
+    priority = 610
     keywords = ["group", "plot", "bar chart", "comparison", "visualization",
                 "hover", "selection", "pyqtgraph"]
     category = "Biblium"
@@ -825,7 +832,6 @@ class OWGroupCountsPlot(OWWidget):
             if not fname.endswith('.png'):
                 fname += '.png'
             try:
-                import pyqtgraph.exporters
                 exporter = pg.exporters.ImageExporter(
                     self.chart.getPlotItem()
                 )

@@ -8,25 +8,30 @@ Uses Biblium's generate_group_matrix for flexible group definitions.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtCore import Qt, pyqtSignal
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QLabel, QPushButton, QComboBox, QSpinBox, QLineEdit, QTextEdit,
-    QRadioButton, QButtonGroup, QTableWidget, QTableWidgetItem,
-    QTabWidget, QGroupBox, QCheckBox, QProgressBar, QHeaderView,
-    QSplitter, QScrollArea, QFrame, QSizePolicy, QStackedWidget,
-    QListWidget, QListWidgetItem, QAbstractItemView, QFileDialog
+    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
+    QPushButton, QComboBox, QSpinBox, QLineEdit, QTextEdit, QRadioButton,
+    QButtonGroup, QTableWidget, QTableWidgetItem, QTabWidget,
+    QGroupBox, QCheckBox, QProgressBar, QStackedWidget, QFileDialog,
+    QColorDialog, QScrollArea
 )
+from AnyQt.QtGui import QColor
 
 from Orange.data import Table, Domain, StringVariable, ContinuousVariable, DiscreteVariable
 from Orange.widgets import gui
 from Orange.widgets.settings import Setting
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
+try:
+    from orangebib.base import group_color, set_group_color
+except Exception:  # noqa: BLE001
+    group_color = None
+    set_group_color = None
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +139,7 @@ class OWSetupGroups(OWWidget):
     name = "Setup Groups"
     description = "Define document groups for comparative analysis"
     icon = "icons/setup_groups.svg"
-    priority = 5
+    priority = 70
     keywords = ["groups", "comparison", "subgroups", "classification", "clustering"]
     category = "Biblium"
     
@@ -271,6 +276,16 @@ class OWSetupGroups(OWWidget):
         advanced_box.layout().addWidget(self.whole_word_cb)
         
         # Group Configuration Preview
+        # Per-group colour assignment (propagates to all group widgets)
+        self.colors_box = gui.widgetBox(self.controlArea, "🎨 Group colours")
+        self._colors_scroll = QScrollArea(); self._colors_scroll.setWidgetResizable(True)
+        self._colors_scroll.setMaximumHeight(140)
+        self._colors_inner = QWidget()
+        self._color_layout = QVBoxLayout(self._colors_inner)
+        self._colors_scroll.setWidget(self._colors_inner)
+        self.colors_box.layout().addWidget(self._colors_scroll)
+        self._color_buttons = {}
+
         config_box = gui.widgetBox(self.controlArea, "📊 Group Configuration")
         
         self.config_label = QLabel("No groups configured")
@@ -1322,7 +1337,8 @@ class OWSetupGroups(OWWidget):
                 return
             
             self._group_matrix = group_matrix
-            
+            self._update_group_color_ui(list(group_matrix.columns))
+
             # Check for warnings
             n_groups = len(group_matrix.columns)
             n_docs = group_matrix.any(axis=1).sum()
@@ -1614,6 +1630,35 @@ class OWSetupGroups(OWWidget):
         
         return result.reindex(df.index, fill_value=False)
     
+    def _update_group_color_ui(self, names):
+        """Show a colour swatch/button per group; user picks propagate to all
+        group widgets via the shared colour register."""
+        if set_group_color is None:
+            return
+        while self._color_layout.count():
+            it = self._color_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        self._color_buttons = {}
+        for name in names:
+            row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(str(name)[:28]); rl.addWidget(lab, 1)
+            btn = QPushButton(); btn.setFixedWidth(46); btn.setFixedHeight(18)
+            col = group_color(name) if group_color else "#cccccc"
+            btn.setStyleSheet(f"background-color: {col}; border: 1px solid #888;")
+            btn.clicked.connect(lambda _=False, n=name, b=btn: self._pick_group_color(n, b))
+            rl.addWidget(btn)
+            self._color_layout.addWidget(row)
+            self._color_buttons[name] = btn
+
+    def _pick_group_color(self, name, btn):
+        cur = group_color(name) if group_color else "#cccccc"
+        c = QColorDialog.getColor(QColor(cur), self, f"Colour for '{name}'")
+        if c.isValid():
+            set_group_color(name, c.name())
+            btn.setStyleSheet(f"background-color: {c.name()}; border: 1px solid #888;")
+
     def _update_preview_table(self, group_matrix: pd.DataFrame):
         """Update preview table with sample data."""
         self.preview_table.clear()

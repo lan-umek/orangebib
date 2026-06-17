@@ -1,0 +1,9 @@
+# Ship the package + metadata only; keep the sdist clean.
+include README.md CHANGELOG.md LICENSE CITATION.cff setup.py
+recursive-include orangebib *.py
+recursive-include orangebib *.svg *.xlsx *.csv *.txt
+recursive-include orangebib/widgets/help *
+global-exclude *.py[cod]
+global-exclude __pycache__/*
+prune docs
+prune tools

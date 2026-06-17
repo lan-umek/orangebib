@@ -14,13 +14,13 @@ from typing import Optional, List
 import numpy as np
 import pandas as pd
 
-from AnyQt.QtCore import Qt, QRectF, QEvent, QObject, QPointF
-from AnyQt.QtGui import QColor, QFont
+from AnyQt.QtCore import Qt, QRectF
+from AnyQt.QtGui import QColor
 from AnyQt.QtWidgets import QApplication, QToolTip
 
 import pyqtgraph as pg
 
-from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
+from Orange.data import Table
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.visualize.utils.plotutils import AxisItem, PlotWidget
@@ -47,6 +47,7 @@ LINE_OPTIONS = [
     ("Cumulative Citations", "Cumulative Citations"),
     ("Documents", "Number of Documents"),
     ("Citations", "Total Citations"),
+    ("Average Citations", "Average Citations"),
     ("Trendline", "Trendline"),
 ]
 
@@ -146,7 +147,7 @@ class ProductionPlotGraph(PlotWidget):
         # Setup
         self.getPlotItem().buttonsHidden = True
         self.getPlotItem().setContentsMargins(10, 10, 10, 10)
-        self.showGrid(x=False, y=True, alpha=0.3)
+        self.showGrid(x=False, y=False, alpha=0.3)
         
         # Legend
         self.legend = pg.LegendItem(offset=(70, 30))
@@ -197,7 +198,9 @@ class ProductionPlotGraph(PlotWidget):
     
     def plot_data(self, years, bar_values, line_values, 
                   bar_color, line_color, bar_label, line_label,
-                  show_legend=True, title=""):
+                  show_legend=True, title="",
+                  x_label="", y_left_label="", y_right_label="",
+                  bar_legend="", line_legend=""):
         """Plot the production data."""
         self.clear_plot()
         
@@ -261,18 +264,21 @@ class ProductionPlotGraph(PlotWidget):
         ticks = [[(i, str(y)) for i, y in enumerate(years)]]
         self.getAxis('bottom').setTicks(ticks)
         
-        # Axis labels and colors
+        # Custom x-axis label (optional)
+        self.setLabel('bottom', x_label or 'Year')
+
+        # Axis labels and colors (custom overrides metric name)
         if bar_values is not None:
-            self.setLabel('left', bar_label)
+            self.setLabel('left', y_left_label or bar_label)
             self.getAxis('left').setPen(pg.mkPen(QColor(bar_color)))
             self.getAxis('left').setTextPen(pg.mkPen(QColor(bar_color)))
         elif line_values is not None:
-            self.setLabel('left', line_label)
+            self.setLabel('left', y_left_label or line_label)
             self.getAxis('left').setPen(pg.mkPen(QColor(line_color)))
             self.getAxis('left').setTextPen(pg.mkPen(QColor(line_color)))
         
         if use_dual_axis:
-            self.setLabel('right', line_label)
+            self.setLabel('right', y_right_label or line_label)
             self.getAxis('right').setPen(pg.mkPen(QColor(line_color)))
             self.getAxis('right').setTextPen(pg.mkPen(QColor(line_color)))
         
@@ -285,10 +291,10 @@ class ProductionPlotGraph(PlotWidget):
             if bar_values is not None:
                 bar_sample = pg.BarGraphItem(x=[0], height=[1], width=0.5,
                                              brush=pg.mkBrush(QColor(bar_color)))
-                self.legend.addItem(bar_sample, bar_label)
+                self.legend.addItem(bar_sample, bar_legend or bar_label)
             if line_values is not None:
                 line_sample = pg.PlotDataItem(pen=pg.mkPen(QColor(line_color), width=2))
-                self.legend.addItem(line_sample, line_label)
+                self.legend.addItem(line_sample, line_legend or line_label)
             self.legend.show()
         
         self._reset_view(x, bar_values, line_values)
@@ -477,7 +483,7 @@ class OWProductionPlot(OWWidget):
     name = "Production Plot"
     description = "Visualize scientific production with bar and line charts"
     icon = "icons/production_plot.svg"
-    priority = 65
+    priority = 150
     keywords = ["plot", "chart", "visualization", "production", "trend", "bar"]
     category = "Biblium"
     
@@ -494,10 +500,15 @@ class OWProductionPlot(OWWidget):
     bar_color_index = settings.Setting(0)  # Blue
     line_color_index = settings.Setting(0)  # Black
     
-    show_grid = settings.Setting(True)
+    show_grid = settings.Setting(False)
     show_legend = settings.Setting(True)
     
-    title = settings.Setting("Scientific Production")
+    title = settings.Setting("Scientific production")
+    x_axis_title = settings.Setting("")
+    y_left_title = settings.Setting("")
+    y_right_title = settings.Setting("")
+    bar_legend = settings.Setting("")
+    line_legend = settings.Setting("")
     
     use_cutpoint = settings.Setting(False)
     cutpoint_year = settings.Setting(2000)
@@ -526,6 +537,7 @@ class OWProductionPlot(OWWidget):
         self._df: Optional[pd.DataFrame] = None
         self._plot_df: Optional[pd.DataFrame] = None  # Processed data for plotting
         self._index_mapping: Optional[List] = None  # Map plot indices to original indices
+        self._row_to_docs: Optional[List] = None  # agg-row -> original doc indices
         
         self._setup_gui()
     
@@ -589,8 +601,19 @@ class OWProductionPlot(OWWidget):
                  callback=self._on_setting_changed)
         
         # Title
-        title_box = gui.widgetBox(self.controlArea, "Title")
-        gui.lineEdit(title_box, self, "title", callback=self._on_setting_changed)
+        title_box = gui.widgetBox(self.controlArea, "Titles & axis labels")
+        gui.lineEdit(title_box, self, "title", label="Title:",
+                     callback=self._on_setting_changed)
+        gui.lineEdit(title_box, self, "x_axis_title", label="X axis:",
+                     callback=self._on_setting_changed)
+        gui.lineEdit(title_box, self, "y_left_title", label="Y left:",
+                     callback=self._on_setting_changed)
+        gui.lineEdit(title_box, self, "y_right_title", label="Y right:",
+                     callback=self._on_setting_changed)
+        gui.lineEdit(title_box, self, "bar_legend", label="Bar legend:",
+                     callback=self._on_setting_changed)
+        gui.lineEdit(title_box, self, "line_legend", label="Line legend:",
+                     callback=self._on_setting_changed)
         
         # Commit
         gui.auto_commit(self.controlArea, self, "auto_commit", "Send Selection")
@@ -635,7 +658,17 @@ class OWProductionPlot(OWWidget):
             return
         
         self._df = self._table_to_df(data)
-        
+        self._row_to_docs = None
+
+        # If the input is raw document-level data (no precomputed production
+        # columns), aggregate it by year so the plot has something to show.
+        if (self._df is not None and "Number of Documents" not in self._df.columns
+                and self._has_year_column()):
+            yc = self._get_year_column()
+            agg, self._row_to_docs = self._aggregate_production(self._df, yc)
+            if agg is not None and not agg.empty:
+                self._df = agg
+
         if not self._has_year_column():
             self.Error.no_year()
             self.graph.clear_plot()
@@ -675,6 +708,43 @@ class OWProductionPlot(OWWidget):
                 return col
         return None
     
+    @staticmethod
+    def _find_citation_col(df: pd.DataFrame) -> Optional[str]:
+        for c in ["Cited by", "Times Cited", "Citation Count", "cited_by_count",
+                  "oa_cited_by_count", "TC", "Citations"]:
+            if c in df.columns:
+                return c
+        return None
+
+    def _aggregate_production(self, df: pd.DataFrame, year_col: str):
+        """Build a per-year production table from document-level data.
+
+        Returns (agg_df, row_to_docs) where row_to_docs[i] are the original
+        document indices contributing to agg row i (for selection output)."""
+        work = df.copy()
+        work["_y"] = pd.to_numeric(work[year_col], errors="coerce")
+        work = work.dropna(subset=["_y"])
+        if work.empty:
+            return None, None
+        work["_y"] = work["_y"].astype(int)
+        cite_col = self._find_citation_col(work)
+        rows, row_to_docs = [], []
+        for year, grp in work.groupby("_y"):
+            n = len(grp)
+            if cite_col:
+                tc = int(pd.to_numeric(grp[cite_col], errors="coerce").fillna(0).sum())
+            else:
+                tc = 0
+            rows.append({"Year": int(year), "Number of Documents": n,
+                         "Total Citations": tc})
+            row_to_docs.append(list(grp.index))
+        agg = pd.DataFrame(rows)  # groupby yields ascending years -> aligned
+        agg["Cumulative Documents"] = agg["Number of Documents"].cumsum()
+        agg["Cumulative Citations"] = agg["Total Citations"].cumsum()
+        agg["Average Citations"] = (
+            agg["Total Citations"] / agg["Number of Documents"]).round(2)
+        return agg, row_to_docs
+
     def _process_data_with_cutpoint(self) -> pd.DataFrame:
         """Process data, merging years before cutpoint if enabled."""
         if self._df is None:
@@ -688,7 +758,9 @@ class OWProductionPlot(OWWidget):
         
         if not self.use_cutpoint:
             # No cutpoint - just ensure years are integers
-            self._index_mapping = list(range(len(df)))
+            self._index_mapping = (self._row_to_docs
+                                   if self._row_to_docs is not None
+                                   else list(range(len(df))))
             return df
         
         # Split data before and after cutpoint
@@ -697,7 +769,9 @@ class OWProductionPlot(OWWidget):
         after = df[~before_mask]
         
         if before.empty:
-            self._index_mapping = list(range(len(df)))
+            self._index_mapping = (self._row_to_docs
+                                   if self._row_to_docs is not None
+                                   else list(range(len(df))))
             return df
         
         # Sum numeric columns for "before" rows
@@ -720,10 +794,15 @@ class OWProductionPlot(OWWidget):
             after.reset_index(drop=True)
         ], ignore_index=True)
         
-        # Index mapping: first index maps to all "before" indices
-        before_indices = list(before.index)
-        after_indices = list(after.index)
-        self._index_mapping = [before_indices] + [[i] for i in after_indices]
+        # Index mapping: first plot bar -> all "before" documents.
+        if self._row_to_docs is not None:
+            before_docs = [d for ri in before.index for d in self._row_to_docs[ri]]
+            self._index_mapping = ([before_docs]
+                                   + [self._row_to_docs[ri] for ri in after.index])
+        else:
+            before_indices = list(before.index)
+            after_indices = list(after.index)
+            self._index_mapping = [before_indices] + [[i] for i in after_indices]
         
         # Show info message
         n_merged = len(before)
@@ -794,6 +873,11 @@ class OWProductionPlot(OWWidget):
             line_label=line_label,
             show_legend=self.show_legend,
             title=self.title,
+            x_label=self.x_axis_title,
+            y_left_label=self.y_left_title,
+            y_right_label=self.y_right_title,
+            bar_legend=self.bar_legend,
+            line_legend=self.line_legend,
         )
     
     @gui.deferred

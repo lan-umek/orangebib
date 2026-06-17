@@ -9,19 +9,17 @@ Combines dimensionality reduction (MCA, CA, PCA, SVD) with clustering
 """
 
 import logging
-from typing import Optional, List, Dict, Tuple
-from collections import Counter, defaultdict
+from typing import Optional, List, Tuple
+from collections import Counter
 
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
-from scipy.spatial.distance import pdist
+from scipy.cluster.hierarchy import linkage, dendrogram
 
 from AnyQt.QtCore import Qt
 from AnyQt.QtGui import QColor
-from AnyQt.QtWidgets import (QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
-                              QLabel, QTableWidget, QTableWidgetItem, QToolTip,
-                              QHeaderView, QSplitter)
+from AnyQt.QtWidgets import (QTabWidget, QWidget, QVBoxLayout, QTableWidget,
+                              QTableWidgetItem, QToolTip, QHeaderView)
 
 import pyqtgraph as pg
 
@@ -504,7 +502,7 @@ class DendrogramWidget(QWidget):
             # Plot the dendrogram manually using pyqtgraph
             icoord = np.array(dend['icoord'])
             dcoord = np.array(dend['dcoord'])
-            colors = dend['color_list']
+            dend['color_list']
             
             for i in range(len(icoord)):
                 x = icoord[i]
@@ -515,7 +513,7 @@ class DendrogramWidget(QWidget):
             
             # Add term labels at bottom
             ivl = dend['ivl']
-            leaves = dend['leaves']
+            dend['leaves']
             
             # X positions for labels
             x_positions = np.arange(5, 5 + len(ivl) * 10, 10)
@@ -664,7 +662,7 @@ class OWFactorialAnalysis(OWWidget):
     name = "Factorial Analysis"
     description = "MCA, CA, PCA with clustering and visualization"
     icon = "icons/factorial.svg"
-    priority = 90
+    priority = 698
     keywords = ["factorial", "mca", "pca", "ca", "svd", "clustering", "correspondence"]
     category = "Biblium"
     
@@ -845,7 +843,6 @@ class OWFactorialAnalysis(OWWidget):
     
     def term_selection_changed(self):
         """Handle term selection in plot."""
-        pass
     
     @Inputs.data
     def set_data(self, data: Optional[Table]):

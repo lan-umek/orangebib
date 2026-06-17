@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+  <path d="M14 14 L34 14 L24 32 Z" fill="none" stroke="#404040" stroke-width="2"/>
+  <circle cx="14" cy="14" r="5" fill="#555555"/>
+  <circle cx="34" cy="14" r="5" fill="#777777"/>
+  <circle cx="24" cy="32" r="5" fill="#999999"/>
+  <text x="14" y="17" font-family="Arial" font-size="6" fill="#fff" text-anchor="middle">7</text>
+  <text x="34" y="17" font-family="Arial" font-size="6" fill="#fff" text-anchor="middle">9</text>
+  <text x="24" y="35" font-family="Arial" font-size="6" fill="#fff" text-anchor="middle">13</text>
+</svg>

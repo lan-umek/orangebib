@@ -13,22 +13,19 @@ Features:
 """
 
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QTabWidget, QFrame,
-    QToolTip, QApplication,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QComboBox, QTableWidget, QTableWidgetItem, QSizePolicy,
+    QTabWidget, QToolTip, QApplication,
 )
 from AnyQt.QtCore import Qt, pyqtSignal, QRectF
-from AnyQt.QtGui import QFont, QColor, QCursor
 
-from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
+from Orange.data import Table, Domain, StringVariable
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
@@ -36,7 +33,6 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 # Import pyqtgraph
 try:
     import pyqtgraph as pg
-    from Orange.widgets.visualize.utils.plotutils import AxisItem
     from Orange.widgets.utils.plot import SELECT, PANNING, ZOOMING
     HAS_PYQTGRAPH = True
 except ImportError:
@@ -711,7 +707,7 @@ class OWCitationDistribution(OWWidget):
     name = "Citation Distribution"
     description = "Analyze citation distribution and impact metrics"
     icon = "icons/citation_distribution.svg"
-    priority = 25
+    priority = 300
     keywords = ["citation", "distribution", "h-index", "g-index", "gini", "histogram"]
     category = "Biblium"
     
@@ -767,13 +763,15 @@ class OWCitationDistribution(OWWidget):
         # Settings
         settings_box = gui.widgetBox(self.controlArea, "Settings")
         
-        cite_layout = QHBoxLayout()
+        self._cite_row = QWidget()
+        cite_layout = QHBoxLayout(self._cite_row)
+        cite_layout.setContentsMargins(0, 0, 0, 0)
         cite_layout.addWidget(QLabel("Citations:"))
         self.cite_combo = QComboBox()
         self.cite_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cite_combo.currentTextChanged.connect(self._on_column_changed)
         cite_layout.addWidget(self.cite_combo)
-        settings_box.layout().addLayout(cite_layout)
+        settings_box.layout().addWidget(self._cite_row)
         
         # Histogram options
         hist_box = gui.widgetBox(self.controlArea, "Histogram")
@@ -1117,6 +1115,9 @@ class OWCitationDistribution(OWWidget):
         elif self._available_cite_cols:
             self.cite_combo.setCurrentIndex(0)
             self.citations_column = self._available_cite_cols[0]
+        # The selector is only useful with multiple citation columns
+        # (e.g. Scopus + OpenAlex + Semantic Scholar); hide it otherwise.
+        self._cite_row.setVisible(len(self._available_cite_cols) > 1)
     
     def _clear_displays(self):
         if HAS_PYQTGRAPH:

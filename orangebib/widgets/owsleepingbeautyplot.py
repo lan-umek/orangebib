@@ -13,20 +13,17 @@ Features:
 """
 
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QListWidget, QListWidgetItem,
-    QFileDialog, QMessageBox, QAbstractItemView, QWidget,
-    QTabWidget, QToolTip, QSplitter, QFrame,
+    QVBoxLayout, QLabel, QPushButton,
+    QListWidget, QListWidgetItem, QFileDialog, QMessageBox,
+    QAbstractItemView, QTabWidget, QToolTip,
 )
-from AnyQt.QtCore import Qt, QPointF, pyqtSignal
-from AnyQt.QtGui import QFont, QColor, QPen, QBrush
+from AnyQt.QtCore import Qt, pyqtSignal
 
 from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -107,7 +104,7 @@ class HoverScatterPlot(pg.PlotWidget):
         
         # Default colors and sizes
         if colors is None:
-            colors = ['#7c3aed'] * n
+            colors = ['#2563eb'] * n
         if sizes is None:
             sizes = [self._default_size] * n
         
@@ -165,7 +162,6 @@ class HoverScatterPlot(pg.PlotWidget):
         # Find clicked point
         min_dist = float('inf')
         clicked = None
-        clicked_idx = None
         
         for i, pt in enumerate(self._data_points):
             dist = ((pt['x'] - mouse_point.x()) ** 2 + 
@@ -173,7 +169,6 @@ class HoverScatterPlot(pg.PlotWidget):
             if dist < min_dist:
                 min_dist = dist
                 clicked = pt
-                clicked_idx = i
         
         # Check threshold
         view_range = self.viewRange()
@@ -459,7 +454,7 @@ class TrajectoryPlot(pg.PlotWidget):
         # Bar plot
         bar = pg.BarGraphItem(
             x=years, height=citations, width=0.7,
-            brush=pg.mkBrush('#7c3aed'),
+            brush=pg.mkBrush('#2563eb'),
             pen=pg.mkPen('w', width=1)
         )
         self.addItem(bar)
@@ -512,10 +507,10 @@ class TrajectoryPlot(pg.PlotWidget):
         self.clear()
         self._year_data = []
         
-        colors = ['#7c3aed', '#ef4444', '#22c55e', '#3b82f6', '#f59e0b',
+        colors = ['#2563eb', '#ef4444', '#22c55e', '#3b82f6', '#f59e0b',
                   '#ec4899', '#06b6d4', '#8b5cf6', '#10b981', '#f97316']
         
-        legend = self.addLegend(offset=(10, 10))
+        self.addLegend(offset=(10, 10))
         
         for i, traj in enumerate(trajectories[:10]):
             years = traj.get('years', [])
@@ -582,7 +577,7 @@ class OWSleepingBeautyPlot(OWWidget):
     name = "Sleeping Beauty Plot"
     description = "Interactive visualization of sleeping beauty detection results"
     icon = "icons/sleeping_beauty_plot.svg"
-    priority = 70
+    priority = 346
     keywords = ["sleeping beauty", "plot", "visualization", "citation", "trajectory"]
     category = "Biblium"
     
@@ -632,7 +627,7 @@ class OWSleepingBeautyPlot(OWWidget):
             f"Click to select, hover for details<br>"
             f"<i>{status}</i></small>"
         )
-        info_label.setStyleSheet("color: #7c3aed; background-color: #ede9fe; padding: 8px; border-radius: 4px;")
+        info_label.setStyleSheet("color: #2563eb; background-color: #dbeafe; padding: 8px; border-radius: 4px;")
         info_box.layout().addWidget(info_label)
         
         # Options

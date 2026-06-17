@@ -4,12 +4,14 @@ Load Bibliographic Data Widget - Orange widget for bibliometric data.
 """
 
 import os
+import re
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List
 
 import numpy as np
 import pandas as pd
+from urllib.parse import urlparse
 
 from AnyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -18,10 +20,10 @@ from AnyQt.QtWidgets import (
     QProgressBar, QTabWidget, QCheckBox, QPlainTextEdit,
     QScrollArea, QFrame, QApplication,
 )
-from AnyQt.QtCore import Qt, QThread, pyqtSignal, QTimer
+from AnyQt.QtCore import Qt, QThread, pyqtSignal
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
-from Orange.widgets import gui, settings
+from Orange.widgets import settings
 from Orange.widgets.widget import OWWidget, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 
@@ -34,7 +36,6 @@ COUNTRY_CODE_TO_NAME = {}
 
 try:
     import biblium
-    from biblium import readbib
     from biblium.biblium_main import BiblioAnalysis
     BIBLIUM_DIR = os.path.dirname(biblium.__file__)
     BIBLIUM_DATA_DIR = os.path.join(BIBLIUM_DIR, "data")
@@ -76,10 +77,19 @@ if not COUNTRY_CODE_TO_NAME:
     }
 
 try:
-    import requests
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+# COBISS / SICRIS personal-bibliography loader (optional)
+HAS_COBISS = False
+COBISS_IMPORT_ERROR = ""
+try:
+    from biblium.cobiss_api import fetch_personal_bibliography_to_csv
+    HAS_COBISS = True
+except Exception as _cobiss_exc:  # noqa: BLE001 - capture any import-chain error
+    fetch_personal_bibliography_to_csv = None
+    COBISS_IMPORT_ERROR = f"{type(_cobiss_exc).__name__}: {_cobiss_exc}"
 
 logger = logging.getLogger(__name__)
 
@@ -418,14 +428,75 @@ class FetchWorker(QThread):
         }
 
 
+class SicrisWorker(QThread):
+    """Background worker that fetches a COBISS/SICRIS personal bibliography."""
+
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(object, str)  # DataFrame, error
+
+    def __init__(self, url, citation_source):
+        super().__init__()
+        self._url = url
+        self._citation_source = citation_source
+
+    def run(self):
+        import tempfile
+        src = (self._url or "").strip().strip('"')
+        try:
+            if os.path.isfile(src):
+                # --- Local COBISS export (HTML/XML file already on disk) ---
+                self.progress.emit(20, "Parsing local COBISS file...")
+                from biblium.utilsbib_modules.cobiss_parser import (
+                    parse_cobiss_html, records_to_dataframe,
+                )
+                records, _meta = parse_cobiss_html(
+                    src,
+                    default_citation_source=self._citation_source,
+                    is_path=True,
+                )
+                df = records_to_dataframe(records)
+                self.progress.emit(100, f"Loaded {len(df)} records from file")
+                self.finished.emit(df, "")
+                return
+
+            # --- Remote COBISS / SICRIS URL ---
+            parsed = urlparse(src)
+            if not (parsed.scheme and parsed.netloc):
+                self.finished.emit(
+                    None,
+                    "Not a valid URL or existing file. Paste the full address "
+                    "(https://bib.cobiss.net/.../webBiblio/bibNNN_*.html) or "
+                    "select an existing local .html file.")
+                return
+
+            self.progress.emit(15, "Connecting to COBISS/SICRIS...")
+            from biblium.cobiss_api import fetch_personal_bibliography_to_csv
+            tmp = os.path.join(tempfile.gettempdir(), "sicris_bibliography.csv")
+            result = fetch_personal_bibliography_to_csv(
+                src, tmp,
+                default_citation_source=self._citation_source,
+                verbose=False,
+            )
+            csv_path = getattr(result, "csv_path", None) or tmp
+            self.progress.emit(80, "Reading records...")
+            df = pd.read_csv(csv_path, encoding="utf-8")
+            name = getattr(result, "researcher_name", None)
+            self.progress.emit(100, f"Loaded {len(df)} records"
+                               + (f" for {name}" if name else ""))
+            self.finished.emit(df, "")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("SICRIS fetch failed")
+            self.finished.emit(None, f"{type(exc).__name__}: {exc}")
+
+
 class OWBibliographicData(OWWidget):
     """Load Bibliographic Data with preprocessing options."""
     
     name = "Bibliographic Data"
-    description = "Load bibliometric data from files or OpenAlex API"
+    description = "Load bibliometric data from files, OpenAlex API, or SICRIS/COBISS"
     icon = "icons/bibliographic_data.svg"
     priority = 10
-    keywords = ["bibliometric", "scopus", "web of science", "openalex"]
+    keywords = ["bibliometric", "scopus", "web of science", "openalex", "sicris", "cobiss"]
     category = "Biblium"
     
     class Outputs:
@@ -452,6 +523,10 @@ class OWBibliographicData(OWWidget):
     api_doc_type = settings.Setting(0)
     api_max_results = settings.Setting(200)
     api_open_access = settings.Setting(False)
+
+    # SICRIS / COBISS settings
+    sicris_url = settings.Setting("")
+    sicris_citation_source = settings.Setting("wos")
     
     want_main_area = False
     
@@ -531,6 +606,7 @@ class OWBibliographicData(OWWidget):
         
         self._create_load_tab()
         self._create_api_tab()
+        self._create_sicris_tab()
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -959,6 +1035,117 @@ class OWBibliographicData(OWWidget):
                     break
             self.selected_sample = "none"
     
+    def _browse_sicris_file(self):
+        """Pick a locally downloaded COBISS bibliography file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select COBISS bibliography file", "",
+            "COBISS export (*.html *.htm *.xml);;All files (*)")
+        if path:
+            self.sicris_url = path
+            self.sicris_url_edit.setText(path)
+
+    def _create_sicris_tab(self):
+        """Create the SICRIS / COBISS personal-bibliography loader tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        info = QLabel(
+            "Load a researcher's personal bibliography from "
+            "<b>SICRIS / COBISS</b>. Either paste the full bibliography "
+            "<b>URL</b> (https://bib.cobiss.net/.../webBiblio/bibNNN_*.html) "
+            "or <b>Browse</b> to an already-downloaded .html file."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        url_group = QGroupBox("Source")
+        url_layout = QGridLayout(url_group)
+        url_layout.addWidget(QLabel("Bibliography URL:"), 0, 0)
+        self.sicris_url_edit = QLineEdit()
+        self.sicris_url_edit.setText(self.sicris_url)
+        self.sicris_url_edit.setPlaceholderText(
+            "https://bib.cobiss.net/... URL  or  C:/path/to/bibNNN_*.html")
+        self.sicris_url_edit.textChanged.connect(
+            lambda t: setattr(self, "sicris_url", t))
+        url_layout.addWidget(self.sicris_url_edit, 0, 1)
+        sicris_browse = QPushButton("Browse...")
+        sicris_browse.clicked.connect(self._browse_sicris_file)
+        url_layout.addWidget(sicris_browse, 0, 2)
+
+        url_layout.addWidget(QLabel("Citation source:"), 1, 0)
+        self.sicris_source_combo = QComboBox()
+        self.sicris_source_combo.addItems(["wos", "scopus"])
+        idx = self.sicris_source_combo.findText(self.sicris_citation_source)
+        self.sicris_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.sicris_source_combo.currentTextChanged.connect(
+            lambda t: setattr(self, "sicris_citation_source", t))
+        url_layout.addWidget(self.sicris_source_combo, 1, 1)
+        layout.addWidget(url_group)
+
+        layout.addWidget(self._create_preprocessing_group())
+        layout.addWidget(self._create_keyword_processing_group())
+
+        self.sicris_btn = QPushButton("🇸🇮 Fetch from SICRIS / COBISS")
+        self.sicris_btn.setMinimumHeight(40)
+        self.sicris_btn.setStyleSheet("font-weight: bold;")
+        self.sicris_btn.clicked.connect(self._fetch_sicris)
+        self.sicris_btn.setEnabled(True)
+        if not HAS_COBISS:
+            self.sicris_btn.setToolTip(
+                "Online fetch needs biblium.cobiss_api. Import failed:\n"
+                + (COBISS_IMPORT_ERROR or "unknown")
+                + "\nLocal .html files can still be parsed if biblium is installed.")
+        layout.addWidget(self.sicris_btn)
+
+        layout.addStretch()
+        self.tabs.addTab(tab, "🇸🇮 SICRIS")
+
+    def _fetch_sicris(self):
+        """Fetch a personal bibliography from SICRIS / COBISS."""
+        self.Error.clear()
+        self.Information.clear()
+
+        url = (self.sicris_url or "").strip().strip('"')
+        if not url:
+            self.Error.load_error(
+                "Enter a SICRIS/COBISS URL or browse to a local .html file")
+            return
+        # Online fetch needs cobiss_api; local files only need the parser.
+        import os as _os
+        if not HAS_COBISS and not _os.path.isfile(url):
+            self.Error.load_error(
+                "Online fetch unavailable (biblium.cobiss_api import failed): "
+                + (COBISS_IMPORT_ERROR or "unknown")
+                + ". You can still Browse to a downloaded .html file.")
+            return
+
+        if self.user_stopwords_file:
+            self._load_user_stopwords()
+
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel() if hasattr(self._worker, "cancel") else None
+            self._worker.wait(1000)
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Starting SICRIS fetch...")
+        self.sicris_btn.setEnabled(False)
+        self.load_btn.setEnabled(False)
+        if hasattr(self, "fetch_btn"):
+            self.fetch_btn.setEnabled(False)
+
+        self._worker = SicrisWorker(url, self.sicris_citation_source)
+        self._worker.progress.connect(self._on_fetch_progress, Qt.QueuedConnection)
+        self._worker.finished.connect(self._on_sicris_finished, Qt.QueuedConnection)
+        self._worker.start()
+
+    def _on_sicris_finished(self, result, error):
+        self.sicris_btn.setEnabled(HAS_COBISS)
+        if hasattr(self, "fetch_btn"):
+            self.fetch_btn.setEnabled(HAS_REQUESTS)
+        self._on_fetch_finished(result, error)
+
     def _load_data(self):
         """Load from file."""
         self.Error.clear()
@@ -995,7 +1182,7 @@ class OWBibliographicData(OWWidget):
             df = None
             if HAS_BIBLIUM:
                 try:
-                    bib = BiblioAnalysis(filepath, db=db if db else None)
+                    bib = BiblioAnalysis(filepath, db=db or "")
                     df = bib.df
                     if self.preprocess_level >= 1:
                         try:
@@ -1130,46 +1317,92 @@ class OWBibliographicData(OWWidget):
         # First, extract countries from affiliations if needed
         df = self._extract_countries_from_affiliations(df)
         
-        kw_col = None
-        for col in ["Keywords", "Author Keywords", "keywords", "concepts", "topics"]:
-            if col in df.columns:
-                kw_col = col
-                break
-        
-        if kw_col is None:
+        # All keyword-like columns we normalize (author AND index keywords,
+        # plus OpenAlex concepts/topics) so synonyms/stopwords apply uniformly.
+        kw_candidates = [
+            "Author Keywords", "Author keywords", "Keywords", "DE",
+            "Index Keywords", "Index keywords", "ID",
+            "keywords", "concepts", "topics",
+        ]
+        kw_cols = [c for c in kw_candidates if c in df.columns]
+        if not kw_cols:
             return df
-        
-        sample = df[kw_col].dropna().iloc[0] if len(df[kw_col].dropna()) > 0 else ""
-        sep = "|" if "|" in str(sample) else ";"
-        
-        if self.use_stopwords:
-            stopwords = set(self._get_all_stopwords())
-            if stopwords:
-                def remove_sw(text):
-                    if pd.isna(text):
-                        return text
-                    parts = [p.strip() for p in str(text).split(sep)]
-                    filtered = [p for p in parts if p.lower() not in stopwords]
-                    return sep.join(filtered)
-                df[kw_col] = df[kw_col].apply(remove_sw)
-        
+
+        stopwords = set(self._get_all_stopwords()) if self.use_stopwords else set()
+
+        replacements = {}
         if self.synonyms_text.strip():
-            replacements = {}
             for line in self.synonyms_text.strip().split("\n"):
                 if "=" in line:
-                    old, new = line.split("=", 1)
-                    if old.strip() and new.strip():
-                        replacements[old.strip().lower()] = new.strip()
-            
-            if replacements:
-                def apply_syn(text):
+                    old_t, new_t = line.split("=", 1)
+                    if old_t.strip() and new_t.strip():
+                        replacements[old_t.strip().lower()] = new_t.strip()
+
+        if not stopwords and not replacements:
+            return df
+
+        for kw_col in kw_cols:
+            nonnull = df[kw_col].dropna()
+            sample = " ".join(str(x) for x in nonnull.iloc[:50])
+            # Preserve the column's own separator (each database differs);
+            # check space-variants first so "; " wins over ";".
+            sep = next((c for c in ["||", "|", "; ", ";", ", "] if c in sample), "; ")
+
+            def _is_stop(phrase):
+                pl = phrase.lower().strip()
+                if not pl:
+                    return True
+                if pl in stopwords:
+                    return True
+                # drop a keyword if ALL of its tokens are stopwords
+                toks = [t for t in pl.replace("-", " ").split() if t]
+                return bool(toks) and all(t in stopwords for t in toks)
+
+            def process(text, _sep=sep):
+                if pd.isna(text):
+                    return text
+                parts = [p.strip() for p in str(text).split(_sep)]
+                if stopwords:
+                    parts = [p for p in parts if not _is_stop(p)]
+                if replacements:
+                    parts = [replacements.get(p.lower(), p) for p in parts]
+                return _sep.join(parts)
+
+            df[kw_col] = df[kw_col].apply(process)
+
+        # Also clean Title / Abstract with the SELECTED specific categories,
+        # the user's stopword list and the extra stopwords (not the general
+        # English list, to keep the text readable).
+        if self.use_stopwords:
+            cat_words = set()
+            for cat in self.selected_categories:
+                cat_words.update(w.lower() for w in
+                                 self._specific_stopwords.get(cat, []))
+            cat_words.update(w.lower() for w in self._user_stopwords)
+            if self.extra_stopwords.strip():
+                cat_words.update(w.strip().lower()
+                                 for w in self.extra_stopwords.split(",") if w.strip())
+            cat_words = {w for w in cat_words if w}
+            if cat_words:
+                singles = {w for w in cat_words if " " not in w}
+                multis = sorted((w for w in cat_words if " " in w), key=len, reverse=True)
+
+                def _clean_text(text):
                     if pd.isna(text):
                         return text
-                    parts = [p.strip() for p in str(text).split(sep)]
-                    replaced = [replacements.get(p.lower(), p) for p in parts]
-                    return sep.join(replaced)
-                df[kw_col] = df[kw_col].apply(apply_syn)
-        
+                    txt = str(text)
+                    for ph in multis:
+                        txt = re.sub(r"(?i)\b" + re.escape(ph) + r"\b", " ", txt)
+                    if singles:
+                        kept = [w for w in txt.split()
+                                if re.sub(r"[^\w-]", "", w).lower() not in singles]
+                        txt = " ".join(kept)
+                    return re.sub(r"\s+", " ", txt).strip()
+
+                for tc in [c for c in ("Title", "Abstract", "title", "abstract")
+                           if c in df.columns]:
+                    df[tc] = df[tc].apply(_clean_text)
+
         return df
     
     def _fetch_api(self):

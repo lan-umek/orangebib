@@ -13,17 +13,20 @@ Fits a logistic curve to cumulative publication data and provides:
 """
 
 import logging
-from typing import Optional, List, Dict, Tuple
+from datetime import datetime
+from typing import Optional, List, Dict
+
+# Default projection horizons relative to the current year (rounded to 5s)
+_CY = datetime.now().year
+_DEFAULT_PROJECTION_YEARS = [_CY, ((_CY // 5) + 1) * 5, ((_CY // 5) + 2) * 5]
+_DEFAULT_PROJECTION_STR = ", ".join(str(y) for y in _DEFAULT_PROJECTION_YEARS)
 
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
-from scipy.stats import pearsonr
 
 from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QColor, QFont
-from AnyQt.QtWidgets import (QSplitter, QTabWidget, QTextEdit, QVBoxLayout, 
-                              QHBoxLayout, QWidget, QLabel, QFrame, QGridLayout)
+from AnyQt.QtWidgets import (QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 import pyqtgraph as pg
 
@@ -66,17 +69,32 @@ def fit_logistic_model(years: np.ndarray, cumulative: np.ndarray) -> Dict:
     
     Returns dict with model parameters and fit statistics.
     """
-    # Initial parameter estimates
-    K_init = cumulative[-1] * 1.5  # Saturation above current total
-    tm_init = years[len(years) // 2]  # Middle year
-    r_init = 0.1  # Moderate growth rate
-    
-    # Bounds
-    bounds = (
-        [cumulative[-1], 0.001, years[0]],  # Lower bounds
-        [cumulative[-1] * 10, 2.0, years[-1] + 50]  # Upper bounds
-    )
-    
+    # Work on year-sorted data so first/last are min/max even if the input
+    # was not ordered (a common cause of invalid bounds).
+    order = np.argsort(years)
+    years = np.asarray(years, dtype=float)[order]
+    cumulative = np.asarray(cumulative, dtype=float)[order]
+
+    y_min, y_max = float(years.min()), float(years.max())
+    total = float(cumulative.max())
+    if not np.isfinite(total) or total <= 0:
+        total = 1.0
+
+    # Strictly increasing bounds (lower < upper) for K, r, tm.
+    K_lo, K_hi = total, max(total * 10.0, total + 1.0)
+    r_lo, r_hi = 1e-4, 5.0
+    tm_lo, tm_hi = y_min - 1.0, y_max + 50.0
+    if tm_hi <= tm_lo:
+        tm_hi = tm_lo + 1.0
+    bounds = ([K_lo, r_lo, tm_lo], [K_hi, r_hi, tm_hi])
+
+    # Initial estimates, clamped strictly inside the bounds.
+    def _clamp(v, lo, hi):
+        return min(max(v, lo + 1e-9), hi - 1e-9)
+    K_init = _clamp(total * 1.5, K_lo, K_hi)
+    tm_init = _clamp(float(years[len(years) // 2]), tm_lo, tm_hi)
+    r_init = _clamp(0.1, r_lo, r_hi)
+
     try:
         popt, pcov = curve_fit(
             logistic_function, years, cumulative,
@@ -180,7 +198,7 @@ class LifeCyclePlotGraph(PlotWidget):
         
         self.getPlotItem().buttonsHidden = True
         self.getPlotItem().setContentsMargins(10, 10, 10, 10)
-        self.showGrid(x=True, y=True, alpha=0.3)
+        self.showGrid(x=False, y=False, alpha=0.2)
         
         self.legend = pg.LegendItem(offset=(70, 30))
         self.legend.setParentItem(self.getPlotItem())
@@ -452,7 +470,7 @@ class OWLifeCycle(OWWidget):
     name = "Life Cycle Analysis"
     description = "Analyze the life cycle of scientific production using logistic growth model"
     icon = "icons/life_cycle.svg"
-    priority = 85
+    priority = 240
     keywords = ["life cycle", "logistic", "growth", "saturation", "forecast"]
     category = "Biblium"
     
@@ -465,7 +483,9 @@ class OWLifeCycle(OWWidget):
     
     # Settings
     forecast_years = settings.Setting(50)
-    projection_years_str = settings.Setting("2025, 2030, 2035")
+    fit_from = settings.Setting(0)  # 0 = auto
+    fit_to = settings.Setting(0)    # 0 = auto
+    projection_years_str = settings.Setting(_DEFAULT_PROJECTION_STR)
     show_milestones = settings.Setting(True)
     show_forecast = settings.Setting(True)
     forecast_limit = settings.Setting(30)
@@ -498,8 +518,12 @@ class OWLifeCycle(OWWidget):
         # Model Settings
         model_box = gui.widgetBox(self.controlArea, "Model Settings")
         
-        gui.spin(model_box, self, "forecast_years", minv=10, maxv=100,
-                 label="Forecast Years:", callback=self._on_setting_changed)
+        gui.spin(model_box, self, "forecast_years", minv=1, maxv=200,
+                 label="Forecast horizon (years):", callback=self._on_setting_changed)
+        gui.spin(model_box, self, "fit_from", minv=0, maxv=2100,
+                 label="Fit from year (0=auto):", callback=self._on_setting_changed)
+        gui.spin(model_box, self, "fit_to", minv=0, maxv=2100,
+                 label="Fit to year (0=auto):", callback=self._on_setting_changed)
         
         gui.lineEdit(model_box, self, "projection_years_str",
                      label="Projection Years:", callback=self._on_setting_changed)
@@ -512,9 +536,6 @@ class OWLifeCycle(OWWidget):
         
         gui.checkBox(display_box, self, "show_forecast", "Show Forecast Period",
                      callback=self._update_plot)
-        
-        gui.spin(display_box, self, "forecast_limit", minv=10, maxv=100,
-                 label="Plot Forecast Limit:", callback=self._update_plot)
         
         # Run button
         self.run_btn = gui.button(
@@ -659,20 +680,36 @@ class OWLifeCycle(OWWidget):
             self.Error.no_docs()
             return
         
-        # Prepare data
-        df = self._df[[year_col, docs_col]].dropna()
-        df = df.sort_values(year_col)
-        
-        years = df[year_col].values.astype(float)
-        docs = df[docs_col].values.astype(float)
-        
-        # Check if cumulative or annual
-        if not np.all(np.diff(docs) >= 0):
-            # Annual data - convert to cumulative
-            cumulative = np.cumsum(docs)
+        # Prepare data. The model needs ONE production value per year. If the
+        # input is raw bibliographic data (many rows per year), aggregate by
+        # counting / summing per year; if it is already a per-year series, use
+        # it directly.
+        yr = pd.to_numeric(self._df[year_col], errors="coerce")
+        work = pd.DataFrame({"_y": yr})
+        dvals = pd.to_numeric(self._df[docs_col], errors="coerce") if docs_col else None
+        work["_d"] = dvals if dvals is not None else 1.0
+        work = work.dropna(subset=["_y"])
+        work = work[(work["_y"] >= 1500) & (work["_y"] <= 2100)]
+        if self.fit_from and self.fit_from > 0:
+            work = work[work["_y"] >= self.fit_from]
+        if self.fit_to and self.fit_to > 0:
+            work = work[work["_y"] <= self.fit_to]
+        if work.empty:
+            self.Error.insufficient_data()
+            return
+        n_years = work["_y"].nunique()
+        if len(work) > n_years:
+            # raw data with repeats -> annual production = sum of _d per year
+            grp = work.groupby(work["_y"].astype(int))["_d"].sum().sort_index()
+            years = grp.index.values.astype(float)
+            annual = grp.values.astype(float)
+            cumulative = np.cumsum(annual)
         else:
-            cumulative = docs
-        
+            g = work.sort_values("_y")
+            years = g["_y"].values.astype(float)
+            docs = g["_d"].values.astype(float)
+            cumulative = docs if np.all(np.diff(docs) >= 0) else np.cumsum(docs)
+
         if len(years) < 5:
             self.Error.insufficient_data()
             return
@@ -713,7 +750,7 @@ class OWLifeCycle(OWWidget):
         try:
             projection_years = [int(y.strip()) for y in self.projection_years_str.split(",")]
         except:
-            projection_years = [2025, 2030, 2035]
+            projection_years = list(_DEFAULT_PROJECTION_YEARS)
         
         self.summary_widget.update_summary(
             self._results,
@@ -736,7 +773,7 @@ class OWLifeCycle(OWWidget):
         
         # Generate forecast
         last_year = int(years[-1])
-        forecast_years = np.arange(last_year, last_year + self.forecast_limit + 1)
+        forecast_years = np.arange(last_year, last_year + self.forecast_years + 1)
         forecast_values = logistic_function(forecast_years, K, r, tm)
         
         # Milestones

@@ -10,13 +10,19 @@ Orange widget using Biblium's citation network implementation.
 import logging
 import re
 from typing import Optional, List, Dict, Tuple
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from AnyQt.QtWidgets import (QLabel, QPushButton, QComboBox, QCheckBox,
+                             QHBoxLayout, QFileDialog, QApplication)
 from AnyQt.QtCore import Qt
-from AnyQt.QtWidgets import QLabel
+try:
+    import pyqtgraph as pg
+    HAS_PG = True
+except Exception:  # noqa: BLE001
+    pg = None
+    HAS_PG = False
 
 from Orange.data import Table, Domain, StringVariable, ContinuousVariable
 from Orange.widgets import gui, settings
@@ -88,7 +94,6 @@ def build_openalex_citation_network(
     Build citation network from OpenAlex data using exact ID matching.
     No fuzzy matching needed - OpenAlex provides exact work IDs.
     """
-    url_prefix = "https://openalex.org/"
     tail_pat = re.compile(r"(W\d+)$")
     
     def to_short(s: str) -> str:
@@ -103,19 +108,54 @@ def build_openalex_citation_network(
                 return opt
         return None
     
-    actual_id_col = find_col([id_col, "id", "unique-id", "ids.openalex", "work_id", "OpenAlex ID"])
-    actual_refs_col = find_col([refs_col, "referenced_works", "References", "references"])
+    # references first — their ID space dictates which id column to use
+    actual_refs_col = find_col([refs_col, "oa_referenced_works", "referenced_works",
+                                "References", "references", "Cited References", "CR"])
+    oa_refs = actual_refs_col in ("oa_referenced_works", "referenced_works")
+    if oa_refs:
+        # references are OpenAlex work IDs -> the document id MUST also be its
+        # OpenAlex work id (matching DOIs against OpenAlex IDs yields no edges,
+        # which is why Scopus-enriched-with-OpenAlex looked like isolated nodes)
+        actual_id_col = find_col([id_col, "oa_openalex_id", "openalex_id",
+                                  "ids.openalex", "OpenAlex ID", "oa_id",
+                                  "work_id", "id", "unique-id"])
+    else:
+        actual_id_col = find_col([id_col, "id", "unique-id", "DOI", "doi",
+                                  "EID", "UT", "PubMed ID", "pmid"])
+    # auto-detect the reference separator
+    if actual_refs_col is not None:
+        _samp = " ".join(df[actual_refs_col].dropna().astype(str).head(20))
+        sep = next((c for c in ["||", "|", "; ", ";", ", ", " "] if c in _samp), sep)
     actual_title_col = find_col([title_col, "title", "Title", "display_name"])
     actual_year_col = find_col([year_col, "publication_year", "Year", "year", "PY"])
     actual_cite_col = find_col([citations_col, "cited_by_count", "Cited by", "Times Cited", "TC"])
+    auth_col = find_col(["Authors", "Author", "Author full names", "AU", "authorships.author.display_name"])
+    src_col = find_col(["Source title", "Source", "Journal", "SO", "host_venue.display_name"])
+    doi_col = find_col(["DOI", "doi"])
+    eid_col = find_col(["EID", "UT"])
+    wid_col = find_col(["oa_openalex_id", "openalex_id", "OpenAlex ID", "ids.openalex"])
+
+    def _first_author(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s0 = str(v)
+        for sp in (";", "|", ","):
+            if sp in s0:
+                return s0.split(sp)[0].strip()
+        return s0.strip()
     
     if actual_id_col is None:
+        if oa_refs:
+            raise ValueError(
+                "References are OpenAlex IDs but no OpenAlex work-id column "
+                "(e.g. 'oa_openalex_id') was found. Re-run the OpenAlex "
+                "Enrichment so each document keeps its OpenAlex ID.")
         raise ValueError(f"No ID column found. Available: {list(df.columns)[:10]}")
     if actual_refs_col is None:
         raise ValueError(f"No references column found. Available: {list(df.columns)[:10]}")
     
     if verbose:
-        print(f"OpenAlex Citation Network")
+        print("OpenAlex Citation Network")
         print(f"  ID column: {actual_id_col}")
         print(f"  References column: {actual_refs_col}")
         print(f"  Documents: {len(df)}")
@@ -140,6 +180,11 @@ def build_openalex_citation_network(
             "title": str(title)[:100] if pd.notna(title) else node_id,
             "year": int(year) if pd.notna(year) and year else 2000,
             "citations": int(citations) if pd.notna(citations) else 0,
+            "author": _first_author(row.get(auth_col)) if auth_col else "",
+            "source": (str(row.get(src_col))[:60] if src_col and pd.notna(row.get(src_col)) else ""),
+            "doi": (str(row.get(doi_col)) if doi_col and pd.notna(row.get(doi_col)) else ""),
+            "eid": (str(row.get(eid_col)) if eid_col and pd.notna(row.get(eid_col)) else ""),
+            "workid": (str(row.get(wid_col)) if wid_col and pd.notna(row.get(wid_col)) else node_id),
         }
     
     # Process references - explode pipe-separated IDs
@@ -251,15 +296,57 @@ def build_fuzzy_citation_network(
     titles = df[title_col].tolist()
     doc_ids = df[id_col].tolist()
     norm_titles = [normalize_text(str(t)) if pd.notna(t) else "" for t in titles]
-    
+
     title_to_idx = {}
     for idx, nt in enumerate(norm_titles):
         if nt and nt not in title_to_idx:
             title_to_idx[nt] = idx
-    
+
+    def _col(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        low = {str(c).lower(): c for c in df.columns}
+        for n in names:
+            if n.lower() in low:
+                return low[n.lower()]
+        return None
+
+    a_col = _col("Authors", "Author", "Author full names", "AU")
+    s_col = _col("Source title", "Source", "Journal", "SO")
+    y_col = _col("Year", "Publication Year", "PY")
+    c_col = _col("Cited by", "Times Cited", "TC", "cited_by_count")
+    d_col = _col("DOI", "doi"); e_col = _col("EID", "UT")
+
+    def _fa(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ""
+        s0 = str(v)
+        for sp in (";", "|", ","):
+            if sp in s0:
+                return s0.split(sp)[0].strip()
+        return s0.strip()
+
+    def _get(idx, col):
+        if col is None:
+            return ""
+        try:
+            v = df[col].iloc[idx]
+            return "" if pd.isna(v) else v
+        except Exception:  # noqa: BLE001
+            return ""
+
     G = nx.DiGraph()
     for idx, doc_id in enumerate(doc_ids):
-        G.add_node(doc_id, title=titles[idx], index=idx)
+        yr = _get(idx, y_col)
+        cc = _get(idx, c_col)
+        G.add_node(doc_id, title=titles[idx], index=idx,
+                   year=int(float(yr)) if str(yr).strip() not in ("", "nan") else 2000,
+                   citations=int(float(cc)) if str(cc).strip() not in ("", "nan") else 0,
+                   author=_fa(_get(idx, a_col)),
+                   source=str(_get(idx, s_col))[:60],
+                   doi=str(_get(idx, d_col)), eid=str(_get(idx, e_col)),
+                   workid=str(doc_id))
     
     total_refs = 0
     matched_refs = 0
@@ -415,7 +502,7 @@ class OWCitationNetwork(OWWidget):
     name = "Citation Network"
     description = "Document citation network with main path analysis"
     icon = "icons/citation_network.svg"
-    priority = 110
+    priority = 420
     keywords = ["citation", "network", "main path"]
     category = "Biblium"
     
@@ -433,8 +520,14 @@ class OWCitationNetwork(OWWidget):
     top_n_docs = settings.Setting(50)
     match_threshold = settings.Setting(80)
     main_path_method = settings.Setting(0)
-    
-    want_main_area = False
+    layout_index = settings.Setting(1)  # default: hierarchical by year
+    node_size_by = settings.Setting(0)   # 0 citations, 1 in-degree, 2 out-degree, 3 uniform
+    curved_edges = settings.Setting(True)
+    show_labels = settings.Setting(True)
+    label_field = settings.Setting(0)
+    highlight_main_path = settings.Setting(True)
+
+    want_main_area = True
     
     class Error(OWWidget.Error):
         no_data = Msg("No input data")
@@ -455,7 +548,17 @@ class OWCitationNetwork(OWWidget):
         self._data = None
         self._df = None
         self._columns = []
+        self._G = None
+        self._main_path = []
         self._setup_gui()
+        if HAS_PG:
+            self.graph = pg.PlotWidget(background="w")
+            self.graph.hideAxis("bottom"); self.graph.hideAxis("left")
+            self.graph.setAspectLocked(False)
+            self.mainArea.layout().addWidget(self.graph)
+        else:
+            self.mainArea.layout().addWidget(
+                QLabel("pyqtgraph not available — plotting disabled"))
     
     def _setup_gui(self):
         box = gui.widgetBox(self.controlArea, "Parameters")
@@ -479,7 +582,40 @@ class OWCitationNetwork(OWWidget):
         info.setStyleSheet("color: #666;")
         box.layout().addWidget(info)
         
+        abox = gui.widgetBox(self.controlArea, "Plot aesthetics")
+        gui.comboBox(abox, self, "layout_index", label="Layout:",
+                     orientation="horizontal",
+                     items=["Spring (force)", "Hierarchical (by year)",
+                            "Circular", "Kamada-Kawai"],
+                     callback=self._redraw, sendSelectedValue=False)
+        gui.comboBox(abox, self, "node_size_by", label="Node size:",
+                     orientation="horizontal",
+                     items=["Citations", "In-degree", "Out-degree", "Uniform"],
+                     callback=self._redraw, sendSelectedValue=False)
+        gui.checkBox(abox, self, "curved_edges", "Curved edges", callback=self._redraw)
+        gui.checkBox(abox, self, "show_labels", "Show labels", callback=self._redraw)
+        gui.comboBox(abox, self, "label_field", label="Label format:",
+                     orientation="horizontal",
+                     items=["Author, Year", "Author, Year, Source",
+                            "Author, Year, Title, Source", "Identifier (DOI/EID/WorkID)",
+                            "Title"],
+                     callback=self._redraw, sendSelectedValue=False)
+        gui.checkBox(abox, self, "highlight_main_path", "Highlight main path",
+                     callback=self._redraw)
+
         gui.button(self.controlArea, self, "Build Network", callback=self._build_network)
+
+        ebox = gui.widgetBox(self.controlArea, "Export (Pajek)")
+        row = QHBoxLayout()
+        b1 = QPushButton(".net"); b1.clicked.connect(lambda: self._export_pajek("net"))
+        b2 = QPushButton(".clu"); b2.clicked.connect(lambda: self._export_pajek("clu"))
+        b3 = QPushButton(".vec"); b3.clicked.connect(lambda: self._export_pajek("vec"))
+        for b in (b1, b2, b3):
+            row.addWidget(b)
+        ebox.layout().addLayout(row)
+        ball = QPushButton("Save all (.net + .clu + .vec)")
+        ball.clicked.connect(lambda: self._export_pajek("all"))
+        ebox.layout().addWidget(ball)
         self.controlArea.layout().addStretch()
     
     def _on_change(self):
@@ -580,39 +716,43 @@ class OWCitationNetwork(OWWidget):
                 else:
                     df = df.head(self.top_n_docs)
             
-            # Detect data source and build network
+            # Detect data source and build network. Prefer OpenAlex exact
+            # matching, but fall back to fuzzy title matching if the OpenAlex
+            # path cannot find an ID/references column.
+            G = stats = None
             if self._is_openalex():
-                self.Information.using_openalex()
-                G, stats = build_openalex_citation_network(
-                    df,
-                    keep_largest_component=True,
-                    verbose=True
-                )
-            else:
+                try:
+                    self.Information.using_openalex()
+                    G, stats = build_openalex_citation_network(
+                        df, keep_largest_component=True, verbose=True)
+                except Exception as oa_exc:  # noqa: BLE001
+                    logger.warning("OpenAlex citation path failed: %s", oa_exc)
+                    G = None
+            if G is None:
                 self.Information.using_fuzzy(self.match_threshold)
-                
                 title_col = self._find_column("Title", "TI", "title", "display_name")
-                ref_col = self._find_column("References", "Cited References", "CR")
-                id_col = self._find_column("EID", "DOI", "UT", "id", "unique-id")
-                
+                ref_col = self._find_column(
+                    "References", "Cited References", "CR", "oa_referenced_works",
+                    "referenced_works")
+                id_col = self._find_column("EID", "DOI", "UT", "id", "unique-id",
+                                           "oa_id", "PubMed ID")
                 if not title_col:
-                    self.Error.build_failed(f"No Title column found")
+                    self.Error.build_failed("No Title column found")
                     self._clear_outputs()
                     return
                 if not ref_col:
-                    self.Error.build_failed(f"No References column found")
+                    self.Error.build_failed(
+                        "No references column found. The citation network needs a "
+                        "References column or OpenAlex 'referenced_works' "
+                        "(enrich the data with OpenAlex, including referenced works).")
                     self._clear_outputs()
                     return
-                
                 if not id_col:
                     df["_doc_id"] = [f"DOC_{i}" for i in range(len(df))]
                     id_col = "_doc_id"
-                
                 G, stats = build_fuzzy_citation_network(
                     df, title_col, ref_col, id_col,
-                    threshold=self.match_threshold,
-                    verbose=True
-                )
+                    threshold=self.match_threshold, verbose=True)
             
             if G.number_of_nodes() == 0:
                 self.Error.build_failed("No connected documents found")
@@ -633,13 +773,206 @@ class OWCitationNetwork(OWWidget):
                 G.number_of_nodes(), G.number_of_edges(), len(main_path_nodes)
             )
             
+            self._G = G
+            self._main_path = main_path_nodes or []
             self._send_outputs(G, main_path_nodes, edge_weights)
-            
+            self._redraw()
+
         except Exception as e:
             logger.exception(f"Build failed: {e}")
             self.Error.build_failed(str(e))
             self._clear_outputs()
     
+    # ----------------------------------------------------------- plotting
+    def _layout(self, G, nodes):
+        try:
+            if self.layout_index == 1:   # hierarchical / chronological by year
+                years = {n: float(G.nodes[n].get("year", 0) or 0) for n in nodes}
+                if all(years[n] == 0 for n in nodes):
+                    return nx.spring_layout(G, seed=42)
+                # group by year; within a year, order nodes by the average year
+                # of their neighbours so citation arrows mostly flow forward and
+                # cross less.
+                cols = {}
+                for n in nodes:
+                    cols.setdefault(years[n], []).append(n)
+                def _key(n):
+                    nb = list(G.predecessors(n)) + list(G.successors(n))
+                    nb_years = [years[m] for m in nb if years.get(m)]
+                    return (np.mean(nb_years) if nb_years else years[n],
+                            -(G.in_degree(n)))
+                pos = {}
+                yrs = sorted(cols)
+                vgap = 1.6  # vertical gap between stacked nodes (room for labels)
+                for yr in yrs:
+                    members = sorted(cols[yr], key=_key)
+                    k = len(members)
+                    for i, n in enumerate(members):
+                        pos[n] = (float(yr), (i - (k - 1) / 2.0) * vgap)
+                return pos
+            if self.layout_index == 2:
+                return nx.circular_layout(G)
+            if self.layout_index == 3:
+                return nx.kamada_kawai_layout(G)
+            return nx.spring_layout(G, seed=42, k=1.5 / (len(nodes) ** 0.5 or 1))
+        except Exception:  # noqa: BLE001
+            try:
+                return nx.circular_layout(G)
+            except Exception:  # noqa: BLE001
+                return {n: (0.0, 0.0) for n in nodes}
+
+    def _node_sizes(self, G, nodes):
+        if self.node_size_by == 3:
+            return [12.0] * len(nodes)
+        if self.node_size_by == 1:
+            vals = [G.in_degree(n) for n in nodes]
+        elif self.node_size_by == 2:
+            vals = [G.out_degree(n) for n in nodes]
+        else:
+            vals = [float(G.nodes[n].get("citations", 0) or 0) for n in nodes]
+        vmax = max(vals) if vals else 1
+        return [8 + 26 * (v / vmax if vmax else 0) for v in vals]
+
+    def _node_label(self, n):
+        d = self._G.nodes[n]
+        au = str(d.get("author", "") or "").split(",")[0].split(";")[0].strip()
+        yr = d.get("year", "") or ""
+        yr = "" if yr in (0, "0") else str(int(yr)) if str(yr).isdigit() else str(yr)
+        src = str(d.get("source", "") or "")
+        ttl = str(d.get("title", n) or "")
+        mode = self.label_field
+        if mode == 0:
+            base = ", ".join(x for x in (au, yr) if x)
+        elif mode == 1:
+            base = ", ".join(x for x in (au, yr, src[:24]) if x)
+        elif mode == 2:
+            base = ", ".join(x for x in (au, yr, ttl[:30], src[:20]) if x)
+        elif mode == 3:
+            base = (str(d.get("doi", "")) or str(d.get("eid", ""))
+                    or str(d.get("workid", "")) or str(n))
+        else:
+            base = ttl[:30]
+        return base or str(n)[:18]
+
+    def _redraw(self):
+        if not HAS_PG or not hasattr(self, "graph"):
+            return
+        self.graph.clear()
+        # show a year axis only for the chronological layout
+        if self.layout_index == 1:
+            self.graph.showAxis("bottom")
+            self.graph.setLabel("bottom", "Publication year")
+        else:
+            self.graph.hideAxis("bottom")
+        G = self._G
+        if G is None or G.number_of_nodes() == 0:
+            return
+        nodes = list(G.nodes())
+        pos = self._layout(G, nodes)
+        main_set = (set(zip(self._main_path[:-1], self._main_path[1:]))
+                    if (self.highlight_main_path and self._main_path) else set())
+        xs, ys = [], []
+        mxs, mys = [], []
+        for u, v in G.edges():
+            if u not in pos or v not in pos:
+                continue
+            x0, y0 = pos[u]; x1, y1 = pos[v]
+            if self.curved_edges:
+                mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+                dx, dy = x1 - x0, y1 - y0
+                norm = (dx * dx + dy * dy) ** 0.5 or 1
+                cx, cy = mx - dy / norm * 0.08 * norm, my + dx / norm * 0.08 * norm
+                t = np.linspace(0, 1, 12)
+                bx = (1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t ** 2 * x1
+                by = (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t ** 2 * y1
+                seg_x, seg_y = list(bx) + [np.nan], list(by) + [np.nan]
+            else:
+                seg_x, seg_y = [x0, x1, np.nan], [y0, y1, np.nan]
+            if (u, v) in main_set:
+                mxs += seg_x; mys += seg_y
+            else:
+                xs += seg_x; ys += seg_y
+        if xs:
+            self.graph.addItem(pg.PlotCurveItem(
+                x=np.array(xs), y=np.array(ys), connect="finite",
+                pen=pg.mkPen((150, 150, 150, 110), width=1)))
+        if mxs:
+            self.graph.addItem(pg.PlotCurveItem(
+                x=np.array(mxs), y=np.array(mys), connect="finite",
+                pen=pg.mkPen((217, 83, 79), width=2.5)))
+        sizes = self._node_sizes(G, nodes)
+        years = [float(G.nodes[n].get("year", 0) or 0) for n in nodes]
+        ymin = min([y for y in years if y] or [0]); ymax = max(years or [1])
+        spots = []
+        for i, n in enumerate(nodes):
+            if n not in pos:
+                continue
+            if n in (self._main_path or []):
+                brush = pg.mkBrush(217, 83, 79)
+            else:
+                t = (years[i] - ymin) / (ymax - ymin) if ymax > ymin else 0.5
+                brush = pg.mkBrush(int(60 + 150 * (1 - t)), int(120 + 80 * t),
+                                   int(200 - 120 * t))
+            spots.append({"pos": pos[n], "size": sizes[i], "brush": brush,
+                          "pen": pg.mkPen("w", width=0.5),
+                          "data": str(G.nodes[n].get("title", n))[:60]})
+        sc = pg.ScatterPlotItem(hoverable=True, tip=None)
+        sc.addPoints(spots)
+        self.graph.addItem(sc)
+        if self.show_labels:
+            order = sorted(range(len(nodes)),
+                           key=lambda i: -(G.nodes[nodes[i]].get("citations", 0) or 0))
+            labelled = [nodes[i] for i in order[:25] if nodes[i] in pos]
+            # small alternating vertical offset to reduce label collisions
+            labelled.sort(key=lambda n: (pos[n][0], pos[n][1]))
+            for j, n in enumerate(labelled):
+                dy = 0.35 if (j % 2 == 0) else 0.9   # stagger above the node
+                t = pg.TextItem(self._node_label(n)[:40],
+                                color=(40, 40, 40), anchor=(0.5, 1.0))
+                t.setPos(pos[n][0], pos[n][1] + dy)
+                self.graph.addItem(t)
+        self.graph.getViewBox().autoRange()
+
+    def _export_pajek(self, kind):
+        if self._G is None or self._G.number_of_nodes() == 0:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Pajek", "citation_network",
+            "Pajek (*.net *.clu *.vec);;All files (*)")
+        if not path:
+            return
+        base = path
+        for ext in (".net", ".clu", ".vec"):
+            if base.lower().endswith(ext):
+                base = base[:-4]
+        G = self._G
+        nodes = list(G.nodes())
+        idx = {n: i + 1 for i, n in enumerate(nodes)}
+        mp = set(self._main_path or [])
+        try:
+            if kind in ("net", "all"):
+                with open(base + ".net", "w", encoding="utf-8") as f:
+                    f.write(f"*Vertices {len(nodes)}\n")
+                    for n in nodes:
+                        lbl = str(G.nodes[n].get("title", n)).replace('"', "'")[:60]
+                        f.write(f'{idx[n]} "{lbl}"\n')
+                    f.write("*Arcs\n")
+                    for u, v in G.edges():
+                        f.write(f"{idx[u]} {idx[v]} 1\n")
+            if kind in ("clu", "all"):
+                with open(base + ".clu", "w", encoding="utf-8") as f:
+                    f.write(f"*Vertices {len(nodes)}\n")
+                    for n in nodes:
+                        f.write(f"{2 if n in mp else 1}\n")
+            if kind in ("vec", "all"):
+                with open(base + ".vec", "w", encoding="utf-8") as f:
+                    f.write(f"*Vertices {len(nodes)}\n")
+                    for n in nodes:
+                        f.write(f"{float(G.nodes[n].get('citations', 0) or 0):.4f}\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Pajek export failed")
+            self.Error.build_failed(f"Export failed: {exc}")
+
     def _send_outputs(self, G, main_path_nodes, edge_weights):
         n = G.number_of_nodes()
         nodes = list(G.nodes())
@@ -651,19 +984,26 @@ class OWCitationNetwork(OWWidget):
             ContinuousVariable("Out_Degree"),
             ContinuousVariable("Year"),
         ]
-        meta_vars = [StringVariable("ID"), StringVariable("Title")]
-        
+        meta_vars = [StringVariable("ID"), StringVariable("Label"),
+                     StringVariable("Author"), StringVariable("Title"),
+                     StringVariable("Source"), StringVariable("DOI/EID/WorkID")]
+
         X = np.zeros((n, 4))
         metas = []
-        
+
         for i, node in enumerate(nodes):
             data = G.nodes[node]
             X[i, 0] = data.get("citations", 0)
             X[i, 1] = G.in_degree(node)
             X[i, 2] = G.out_degree(node)
             X[i, 3] = data.get("year", 0)
-            metas.append([str(node), str(data.get("title", node))[:80]])
-        
+            ident = (str(data.get("doi", "")) or str(data.get("eid", ""))
+                     or str(data.get("workid", "")) or str(node))
+            metas.append([str(node), self._node_label(node),
+                          str(data.get("author", "")),
+                          str(data.get("title", node))[:120],
+                          str(data.get("source", "")), ident])
+
         domain = Domain(cont_vars, metas=meta_vars)
         metas_arr = np.array(metas, dtype=object)
         node_table = Table.from_numpy(domain, X, metas=metas_arr)

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- Two columns of circles being shuffled (permutation metaphor) -->
+  <!-- Left column: original order -->
+  <circle cx="10" cy="12" r="3" fill="#404040"/>
+  <circle cx="10" cy="20" r="3" fill="#555555"/>
+  <circle cx="10" cy="28" r="3" fill="#777777"/>
+  <circle cx="10" cy="36" r="3" fill="#aaaaaa"/>
+
+  <!-- Right column: permuted -->
+  <circle cx="38" cy="12" r="3" fill="#777777"/>
+  <circle cx="38" cy="20" r="3" fill="#404040"/>
+  <circle cx="38" cy="28" r="3" fill="#aaaaaa"/>
+  <circle cx="38" cy="36" r="3" fill="#555555"/>
+
+  <!-- Connection lines (showing permutation mapping) -->
+  <line x1="13" y1="12" x2="35" y2="20" stroke="#888888" stroke-width="1.2"/>
+  <line x1="13" y1="20" x2="35" y2="36" stroke="#888888" stroke-width="1.2"/>
+  <line x1="13" y1="28" x2="35" y2="12" stroke="#888888" stroke-width="1.2"/>
+  <line x1="13" y1="36" x2="35" y2="28" stroke="#888888" stroke-width="1.2"/>
+
+  <!-- p-value indicator at top center -->
+  <text x="24" y="9" text-anchor="middle" fill="#333333"
+        font-size="7" font-weight="bold" font-family="Arial">p</text>
+
+  <!-- Histogram bars at bottom (null distribution) -->
+  <rect x="18" y="42" width="2" height="3" fill="#555555"/>
+  <rect x="21" y="40" width="2" height="5" fill="#404040"/>
+  <rect x="24" y="38" width="2" height="7" fill="#333333"/>
+  <rect x="27" y="40" width="2" height="5" fill="#404040"/>
+  <rect x="30" y="42" width="2" height="3" fill="#555555"/>
+</svg>

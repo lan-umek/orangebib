@@ -10,23 +10,19 @@ Specialized widget for identifying Public Administration research paradigms
 
 import logging
 import re
-import json
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QFrame, QLineEdit,
-    QFileDialog, QMessageBox, QListWidget, QListWidgetItem,
-    QAbstractItemView,
+    QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QPushButton, QGroupBox, QTableWidget, QTableWidgetItem,
+    QLineEdit, QFileDialog, QMessageBox, QListWidget,
+    QListWidgetItem, QAbstractItemView,
 )
 from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QFont, QColor
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -43,9 +39,42 @@ logger = logging.getLogger(__name__)
 # Default PA concepts from biblium additional files
 # Format: column name -> list of keywords (rows in that column)
 DEFAULT_PA_CONCEPTS = {
-    "Weber": ["weberian", "neo-weberian", "law"],
-    "Npm": ["new public management", "npm"],
-    "Good Governance": ["good governance", "gg", "transparency"],
+    "Weberian Bureaucracy": ["weberian", "neo-weberian", "bureaucracy",
+        "bureaucratic", "hierarchy", "rational-legal", "rule of law"],
+    "New Public Management": ["new public management", "npm", "marketization",
+        "privatization", "agencification", "managerialism", "contracting out"],
+    "New Public Governance": ["new public governance", "npg",
+        "network governance", "co-production", "coproduction"],
+    "Digital Era Governance": ["digital era governance", "deg",
+        "digital government", "digital governance"],
+    "E-Government": ["e-government", "egovernment", "e-governance",
+        "electronic government", "digital services", "govtech"],
+    "Public Value": ["public value", "public value creation",
+        "public values"],
+    "Good Governance": ["good governance", "rule of law"],
+    "Collaborative Governance": ["collaborative governance", "co-creation",
+        "cocreation", "partnership", "multi-stakeholder", "collaboration"],
+    "Citizen Participation": ["citizen participation", "public participation",
+        "civic engagement", "deliberative", "participatory"],
+    "Accountability": ["accountability", "answerability", "oversight"],
+    "Transparency": ["transparency", "open government", "open data",
+        "freedom of information"],
+    "Performance Management": ["performance management",
+        "performance measurement", "performance indicators", "benchmarking",
+        "kpi"],
+    "Street-Level Bureaucracy": ["street-level bureaucracy", "frontline",
+        "discretion", "street level"],
+    "Policy Implementation": ["policy implementation", "implementation gap",
+        "policy design"],
+    "Wicked Problems": ["wicked problems", "complex problems",
+        "grand challenges"],
+    "Public Service Motivation": ["public service motivation", "psm"],
+    "Red Tape": ["red tape", "administrative burden", "administrative burdens"],
+    "Integrity And Corruption": ["corruption", "integrity", "anti-corruption",
+        "ethics"],
+    "Decentralization": ["decentralization", "decentralisation", "devolution",
+        "local government", "subsidiarity"],
+    "Smart City": ["smart city", "smart cities", "smart governance"],
 }
 
 
@@ -134,7 +163,7 @@ class OWPAConcepts(OWWidget):
     name = "PA Concepts"
     description = "Create Public Administration paradigm indicators"
     icon = "icons/pa_concepts.svg"
-    priority = 67
+    priority = 355
     keywords = ["PA", "public administration", "weber", "npm", "governance", "paradigm"]
     category = "Biblium"
     
@@ -150,7 +179,7 @@ class OWPAConcepts(OWWidget):
     field_index = settings.Setting(0)
     use_regex = settings.Setting(False)
     use_numeric_labels = settings.Setting(True)
-    selected_concepts = settings.Setting(["Weber", "Npm", "Good Governance"])
+    selected_concepts = settings.Setting(["Weberian Bureaucracy", "New Public Management", "New Public Governance"])
     custom_concepts_path = settings.Setting("")
     auto_apply = settings.Setting(True)
     

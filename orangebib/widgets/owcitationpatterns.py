@@ -10,22 +10,22 @@ Features:
 - Selected Documents output for downstream analysis
 """
 
-import json
 import logging
-from typing import Optional, List, Dict, Set
+from typing import List, Dict, Set
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
     QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox, QCheckBox,
-    QTableWidget, QTableWidgetItem,
-    QTabWidget, QFrame, QProgressBar,
-    QFileDialog, QMessageBox, QToolTip,
+    QLabel, QComboBox, QPushButton, QSpinBox, QTableWidget,
+    QTableWidgetItem, QTabWidget,
+    QFrame, QProgressBar, QFileDialog,
+    QMessageBox, QToolTip, QApplication,
 )
-from AnyQt.QtCore import Qt, pyqtSignal
+from AnyQt.QtCore import Qt, QRectF, pyqtSignal
 from AnyQt.QtGui import QColor
+from AnyQt.QtWidgets import QGraphicsRectItem
 
 from Orange.data import Table, Domain, ContinuousVariable, StringVariable, DiscreteVariable
 from Orange.widgets import gui, settings
@@ -41,8 +41,6 @@ logger = logging.getLogger(__name__)
 try:
     from biblium.citation_patterns import (
         analyze_citation_patterns,
-        CitationPatternResult,
-        CitationPattern,
     )
     HAS_BIBLIUM = True
 except ImportError:
@@ -97,7 +95,8 @@ class PatternDistributionPlot(pg.PlotWidget):
         self.scene().sigMouseMoved.connect(self._on_hover)
         self.scene().sigMouseClicked.connect(self._on_click)
     
-    def set_data(self, pattern_counts: Dict[str, int], pattern_indices: Dict[str, List[int]]):
+    def set_data(self, pattern_counts: Dict[str, int], pattern_indices: Dict[str, List[int]],
+                 monochrome: bool = False, sort_by_size: bool = False):
         """Set distribution data."""
         self.clear()
         self._bars = []
@@ -109,6 +108,8 @@ class PatternDistributionPlot(pg.PlotWidget):
         
         # Filter and sort patterns
         patterns = [p for p in PATTERN_ORDER if p in pattern_counts and pattern_counts[p] > 0]
+        if sort_by_size:
+            patterns = sorted(patterns, key=lambda p: pattern_counts[p], reverse=True)
         counts = [pattern_counts[p] for p in patterns]
         
         if not patterns:
@@ -117,7 +118,7 @@ class PatternDistributionPlot(pg.PlotWidget):
         max_count = max(counts)
         
         for i, (pattern, count) in enumerate(zip(patterns, counts)):
-            color = PATTERN_COLORS.get(pattern, '#6b7280')
+            color = '#3b82f6' if monochrome else PATTERN_COLORS.get(pattern, '#6b7280')
             
             bar = pg.BarGraphItem(
                 x0=0, x1=count, y=i, height=0.7,
@@ -155,7 +156,7 @@ class PatternDistributionPlot(pg.PlotWidget):
         for bar in self._bars:
             if (0 <= mouse_point.x() <= bar['count'] and
                 bar['y'] - 0.4 <= mouse_point.y() <= bar['y'] + 0.4):
-                n_papers = len(self._pattern_indices.get(bar['pattern'], []))
+                len(self._pattern_indices.get(bar['pattern'], []))
                 tooltip = f"{bar['pattern']}: {bar['count']} papers\nClick to select all"
                 QToolTip.showText(self.mapToGlobal(self.mapFromScene(pos)), tooltip)
                 return
@@ -221,6 +222,43 @@ class InteractiveScatterPlot(pg.PlotWidget):
         
         self.scene().sigMouseMoved.connect(self._on_hover)
         self.scene().sigMouseClicked.connect(self._on_click)
+        self._legend = self.addLegend(offset=(10, 10))
+        self._legend_samples = []
+
+        # Rubber-band rectangle selection (drag to select multiple points).
+        self._rubber = None
+        _vb = self.plotItem.vb
+        self._orig_drag = _vb.mouseDragEvent
+        _vb.mouseDragEvent = self._rubber_drag
+
+    def _rubber_drag(self, ev, axis=None):
+        vb = self.plotItem.vb
+        if ev.button() != Qt.LeftButton:
+            return self._orig_drag(ev, axis)
+        ev.accept()
+        p0 = vb.mapToView(ev.buttonDownPos())
+        p1 = vb.mapToView(ev.pos())
+        x0, x1 = sorted([p0.x(), p1.x()])
+        y0, y1 = sorted([p0.y(), p1.y()])
+        if self._rubber is None:
+            self._rubber = QGraphicsRectItem()
+            self._rubber.setPen(pg.mkPen('#1f6fb2', width=1, style=Qt.DashLine))
+            self._rubber.setBrush(pg.mkBrush(31, 111, 178, 40))
+            self._rubber.setZValue(60)
+            vb.addItem(self._rubber, ignoreBounds=True)
+        self._rubber.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+        if ev.isFinish():
+            try:
+                vb.removeItem(self._rubber)
+            except Exception:  # noqa: BLE001
+                pass
+            self._rubber = None
+            sel = [pt['index'] for pt in self._points
+                   if x0 <= pt['x'] <= x1 and y0 <= pt['y'] <= y1]
+            if sel:
+                self._selected = set(sel)
+                self._rebuild_scatter()
+                self.selectionChanged.emit(list(self._selected))
     
     def set_data(self, df: pd.DataFrame, x_col: str, y_col: str):
         """Set scatter data."""
@@ -255,10 +293,23 @@ class InteractiveScatterPlot(pg.PlotWidget):
             })
         
         self._rebuild_scatter()
+        self._update_legend()
         
         self.setLabel('bottom', x_col)
         self.setLabel('left', y_col)
         self.setTitle(f'{x_col} vs {y_col} (click to select)')
+
+    def _update_legend(self):
+        try:
+            self._legend.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        patterns = list(dict.fromkeys(p['pattern'] for p in self._points))
+        for pat in patterns:
+            c = PATTERN_COLORS.get(pat, '#6b7280')
+            sample = pg.ScatterPlotItem(
+                [], [], brush=pg.mkBrush(c), pen=pg.mkPen('w', width=1), size=10)
+            self._legend.addItem(sample, pat)
     
     def _rebuild_scatter(self):
         """Rebuild scatter with current selection state."""
@@ -376,8 +427,8 @@ class ByYearPlot(pg.PlotWidget):
         self.scene().sigMouseMoved.connect(self._on_hover)
         self.scene().sigMouseClicked.connect(self._on_click)
     
-    def set_data(self, df: pd.DataFrame):
-        """Plot patterns by year."""
+    def set_data(self, df: pd.DataFrame, year_from: int = 0, year_to: int = 0):
+        """Plot patterns by year. year_from/year_to=0 means auto."""
         self.clear()
         self._year_data = {}
         self._bar_items = []
@@ -389,11 +440,24 @@ class ByYearPlot(pg.PlotWidget):
         
         # Build year_data: {year: {pattern: [indices]}}
         for idx, row in df.iterrows():
-            year = row['Year']
+            raw_year = row['Year']
             pattern = row['Pattern']
-            if pd.isna(year):
+            # Parse + validate the year FIRST so all filters work regardless of
+            # the original dtype (string/float/placeholder 0).
+            if pd.isna(raw_year):
                 continue
-            year = int(year)
+            try:
+                year = int(float(raw_year))
+            except (ValueError, TypeError):
+                continue
+            # Drop placeholder / invalid years (e.g. 0) that otherwise blow up
+            # the x-axis range.
+            if year < 1500 or year > 2100:
+                continue
+            if year_from and year_from > 0 and year < year_from:
+                continue
+            if year_to and year_to > 0 and year > year_to:
+                continue
             
             if year not in self._year_data:
                 self._year_data[year] = {}
@@ -443,6 +507,12 @@ class ByYearPlot(pg.PlotWidget):
         self.setLabel('bottom', 'Publication Year')
         self.setLabel('left', 'Count')
         self.setTitle('Citation Patterns by Year (click to select)')
+        # Explicitly clamp the x-axis to the valid plotted years (or the chosen
+        # period) so stray/placeholder years can never stretch the axis.
+        lo = (year_from if year_from and year_from > 0 else min(years)) - 0.7
+        hi = (year_to if year_to and year_to > 0 else max(years)) + 0.7
+        self.setXRange(lo, hi, padding=0)
+        self.enableAutoRange(axis='x', enable=False)
         
         # Add legend
         for pattern in PATTERN_ORDER:
@@ -525,7 +595,8 @@ class MetricHistogram(pg.PlotWidget):
         self.scene().sigMouseMoved.connect(self._on_hover)
         self.scene().sigMouseClicked.connect(self._on_click)
     
-    def set_data(self, df: pd.DataFrame, metric: str, pattern_filter: str = "All"):
+    def set_data(self, df: pd.DataFrame, metric: str, pattern_filter: str = "All",
+                 n_bins: int = 20, show_median: bool = True):
         """Plot histogram."""
         self.clear()
         self._bins = []
@@ -552,7 +623,7 @@ class MetricHistogram(pg.PlotWidget):
         if values.empty:
             return
         
-        counts, edges = np.histogram(values, bins=20)
+        counts, edges = np.histogram(values, bins=max(int(n_bins), 1))
         
         # Build bins with indices - use valid_df for consistent indexing
         for i in range(len(counts)):
@@ -583,8 +654,8 @@ class MetricHistogram(pg.PlotWidget):
             self.addItem(bar)
             self._bar_items.append(bar)
         
-        # Median line
-        if len(values) > 0:
+        # Median line (optional)
+        if show_median and len(values) > 0:
             med = values.median()
             line = pg.InfiniteLine(pos=med, angle=90, pen=pg.mkPen('#ef4444', width=2, style=Qt.DashLine))
             self.addItem(line)
@@ -649,49 +720,125 @@ class MetricHistogram(pg.PlotWidget):
 
 class TrajectoryPlot(pg.PlotWidget):
     """Multi-trajectory comparison."""
-    
+
+    selectionChanged = pyqtSignal(list)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setBackground('w')
         self.getPlotItem().hideAxis('top')
         self.getPlotItem().hideAxis('right')
         self.showGrid(x=False, y=False)
+        self._traj_points = []  # (x, y, label, pattern, raw_cit, tid)
+        self._traj_meta = {}    # tid -> {index, title, pattern}
+        self._lines = {}        # tid -> PlotDataItem
+        self._selected = set()
+        self._legend = self.addLegend(offset=(10, 10))
+        self._tip = pg.TextItem(color='k', anchor=(0, 1),
+                                fill=pg.mkBrush(255, 255, 220, 230))
+        self._tip.setZValue(100); self._tip.hide()
+        self.addItem(self._tip)
+        self.scene().sigMouseMoved.connect(self._on_hover)
+        self.scene().sigMouseClicked.connect(self._on_click)
+
+    def _nearest(self, pos):
+        if not self._traj_points:
+            return None, 1e18
+        vb = self.getPlotItem().vb
+        if not self.sceneBoundingRect().contains(pos):
+            return None, 1e18
+        mp = vb.mapSceneToView(pos)
+        xr = vb.viewRange()[0]; yr = vb.viewRange()[1]
+        sx = (xr[1] - xr[0]) or 1; sy = (yr[1] - yr[0]) or 1
+        best = None; best_d = 1e18
+        for rec in self._traj_points:
+            x, y = rec[0], rec[1]
+            d = ((x - mp.x()) / sx) ** 2 + ((y - mp.y()) / sy) ** 2
+            if d < best_d:
+                best_d = d; best = rec
+        return best, best_d
+
+    def _on_click(self, ev):
+        best, d = self._nearest(ev.scenePos())
+        if best is None or d > 0.02:
+            return
+        tid = best[5]
+        ctrl = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
+        if ctrl:
+            self._selected.symmetric_difference_update({tid})
+        else:
+            self._selected = set() if self._selected == {tid} else {tid}
+        # highlight selected lines
+        for t, line in self._lines.items():
+            meta = self._traj_meta.get(t, {})
+            color = PATTERN_COLORS.get(meta.get("pattern"), '#6b7280')
+            w = 4 if t in self._selected else 2
+            line.setPen(pg.mkPen(color, width=w))
+        idxs = [self._traj_meta[t]["index"] for t in self._selected
+                if self._traj_meta.get(t, {}).get("index") is not None]
+        self.selectionChanged.emit(idxs)
+
+    def _on_hover(self, pos):
+        if not self._traj_points:
+            return
+        if not self.sceneBoundingRect().contains(pos):
+            self._tip.hide(); return
+        # nearest point in view coordinates
+        best, best_d = self._nearest(pos)
+        if best is not None and best_d < 0.02:
+            x, y, label, pattern, raw = best[0], best[1], best[2], best[3], best[4]
+            self._tip.setText(f"{label}\n{pattern}\nyear {int(x)}: {int(raw)} cit.\n(click to select)")
+            self._tip.setPos(x, y); self._tip.show()
+        else:
+            self._tip.hide()
     
     def set_data(self, trajectories: List[Dict], normalize: bool = True):
         """Plot trajectories."""
         self.clear()
-        
+        self._traj_points = []
+        self._traj_meta = {}
+        self._lines = {}
+        self._selected = set()
+        try:
+            self._legend.clear()
+        except Exception:  # noqa: BLE001
+            pass
+        self.addItem(self._tip)
         if not trajectories:
             return
-        
-        for traj in trajectories[:8]:
+
+        for tid, traj in enumerate(trajectories[:8]):
             years = traj.get('years', [])
             cites = traj.get('citations', [])
             pattern = traj.get('pattern', 'Normal')
-            title = traj.get('title', '')[:20]
-            
+            full_title = traj.get('title', '') or ''
+            title = full_title[:40]
+
             if not years or not cites:
                 continue
-            
+
             y = cites
             if normalize and max(cites) > 0:
                 y = [c / max(cites) for c in cites]
-            
+
             color = PATTERN_COLORS.get(pattern, '#6b7280')
-            
             line = pg.PlotDataItem(
                 x=years, y=y,
                 pen=pg.mkPen(color, width=2),
                 symbol='o', symbolSize=5,
                 symbolBrush=color, symbolPen='w',
-                name=f"{title}... ({pattern})"
+                name=f"{title} ({pattern})"
             )
             self.addItem(line)
-        
+            self._lines[tid] = line
+            self._traj_meta[tid] = {"index": traj.get("index"),
+                                    "title": full_title, "pattern": pattern}
+            for xi, yi, raw in zip(years, y, cites):
+                self._traj_points.append((xi, yi, title, pattern, raw, tid))
+
         self.setLabel('bottom', 'Year')
         self.setLabel('left', 'Normalized Citations' if normalize else 'Citations')
-        self.setTitle('Citation Trajectories')
-        self.addLegend()
+        self.setTitle('Citation Trajectories (hover for details, click to select)')
 
 
 # =============================================================================
@@ -719,7 +866,7 @@ class OWCitationPatterns(OWWidget):
     name = "Citation Patterns"
     description = "Classify papers by citation trajectory"
     icon = "icons/citation_patterns.svg"
-    priority = 71
+    priority = 320
     keywords = ["citation", "pattern", "trajectory", "evergreen", "sleeping beauty"]
     category = "Biblium"
     
@@ -739,6 +886,12 @@ class OWCitationPatterns(OWWidget):
     pattern_filter_idx = settings.Setting(0)
     metric_idx = settings.Setting(0)
     normalize_traj = settings.Setting(True)
+    dist_monochrome = settings.Setting(False)
+    dist_sort_by_size = settings.Setting(False)
+    metric_bins = settings.Setting(20)
+    metric_show_median = settings.Setting(True)
+    year_from = settings.Setting(0)  # 0 = auto (use data min)
+    year_to = settings.Setting(0)    # 0 = auto (use data max)
     
     auto_apply = settings.Setting(False)
     
@@ -846,6 +999,18 @@ class OWCitationPatterns(OWWidget):
         
         gui.checkBox(viz_box, self, "normalize_traj", "Normalize trajectories",
                     callback=self._update_trajectory_plot)
+        gui.checkBox(viz_box, self, "dist_monochrome", "Distribution: single colour",
+                    callback=self._update_distribution_plot)
+        gui.checkBox(viz_box, self, "dist_sort_by_size", "Distribution: sort by size",
+                    callback=self._update_distribution_plot)
+        gui.checkBox(viz_box, self, "metric_show_median", "Metrics: show median line",
+                    callback=self._update_metric_plot)
+        gui.spin(viz_box, self, "metric_bins", minv=3, maxv=100, step=1,
+                 label="Metric bins:", callback=self._update_metric_plot)
+        gui.spin(viz_box, self, "year_from", minv=0, maxv=2100, step=1,
+                 label="By Year from (0=auto):", callback=self._update_year_plot)
+        gui.spin(viz_box, self, "year_to", minv=0, maxv=2100, step=1,
+                 label="By Year to (0=auto):", callback=self._update_year_plot)
         
         # Selection
         sel_box = gui.widgetBox(self.controlArea, "✓ Selection")
@@ -890,6 +1055,7 @@ class OWCitationPatterns(OWWidget):
             self.tabs.addTab(self.year_plot, "📅 By Year")
             
             self.traj_plot = TrajectoryPlot()
+            self.traj_plot.selectionChanged.connect(self._on_selection)
             self.tabs.addTab(self.traj_plot, "📈 Trajectories")
             
             self.metric_plot = MetricHistogram()
@@ -1137,11 +1303,13 @@ class OWCitationPatterns(OWWidget):
                 pattern_indices[p] = []
             pattern_indices[p].append(i)
         
-        self.dist_plot.set_data(self._result.pattern_counts, pattern_indices)
+        self.dist_plot.set_data(self._result.pattern_counts, pattern_indices,
+                                monochrome=self.dist_monochrome,
+                                sort_by_size=self.dist_sort_by_size)
     
     def _update_by_year_plot(self):
         if self._result_df is not None:
-            self.year_plot.set_data(self._result_df)
+            self.year_plot.set_data(self._result_df, self.year_from, self.year_to)
     
     def _update_trajectory_plot(self):
         if self._result is None:
@@ -1153,22 +1321,36 @@ class OWCitationPatterns(OWWidget):
                 continue
             years = sorted(t.counts_by_year.keys())
             cites = [t.counts_by_year[y] for y in years]
+            idx = None
+            if self._result_df is not None and "Title" in self._result_df.columns:
+                hit = self._result_df.index[
+                    self._result_df["Title"].astype(str) == str(t.title)]
+                if len(hit):
+                    idx = int(hit[0])
             trajs.append({
                 'years': years,
                 'citations': cites,
                 'pattern': t.pattern.value,
-                'title': t.title
+                'title': t.title,
+                'index': idx,
             })
-        
+
         self.traj_plot.set_data(trajs, normalize=self.normalize_traj)
     
+    def _update_year_plot(self):
+        if self._result_df is None or not hasattr(self, "year_plot"):
+            return
+        self.year_plot.set_data(self._result_df, self.year_from, self.year_to)
+
     def _update_metric_plot(self):
         if self._result_df is None:
             return
-        
+
         metric = self.METRICS[self.metric_idx]
         pattern = self.PATTERN_FILTERS[self.pattern_filter_idx]
-        self.metric_plot.set_data(self._result_df, metric, pattern)
+        self.metric_plot.set_data(self._result_df, metric, pattern,
+                                  n_bins=self.metric_bins,
+                                  show_median=self.metric_show_median)
     
     def _update_scatter_plot(self):
         if self._result_df is None:

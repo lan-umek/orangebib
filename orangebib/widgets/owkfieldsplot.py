@@ -21,12 +21,10 @@ import pandas as pd
 
 from AnyQt.QtCore import Qt, QPointF, QRectF, QTimer, pyqtSignal
 from AnyQt.QtGui import (QColor, QPainter, QPainterPath, QBrush, QPen, QFont, 
-                          QLinearGradient, QCursor, QTransform)
-from AnyQt.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                              QScrollArea, QFrame, QSizePolicy, QToolTip,
-                              QApplication)
+                          QLinearGradient, QCursor)
+from AnyQt.QtWidgets import (QWidget, QHBoxLayout, QLabel, QSizePolicy, 
+                              QToolTip)
 
-import pyqtgraph as pg
 
 from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -49,6 +47,13 @@ FIELD_TYPES = [
     ("Affiliations", "Affiliations"),
     ("References", "References"),
     ("Year", "Year"),
+    # OpenAlex-enriched fields (available after OpenAlex Enrichment)
+    ("OpenAlex Field", "oa_fields"),
+    ("OpenAlex Subfield", "oa_subfields"),
+    ("OpenAlex Domain", "oa_domains"),
+    ("OpenAlex Topics", "oa_topics"),
+    ("OpenAlex Concepts", "oa_concepts"),
+    ("OpenAlex SDGs", "oa_sdgs"),
 ]
 
 COLOR_BY_OPTIONS = [
@@ -98,6 +103,7 @@ class InteractiveSankeyWidget(QWidget):
         
         # Layout
         self.margin = 80
+        self.side_margin = 150  # extra room so first/last column labels are not clipped
         self.node_width = 25
         self.node_spacing = 15
         self.min_node_height = 20
@@ -197,10 +203,14 @@ class InteractiveSankeyWidget(QWidget):
                 node_color_sums[tgt_key] += color_val * weight
                 node_color_weights[tgt_key] += weight
         
-        # Store in nodes
+        # Store in nodes. Keep the node's own value (set per color_by:
+        # doc_count / citations / avg_year); only derive from connected flows
+        # as a fallback when the node has no value of its own.
         for level, level_nodes in self.nodes.items():
             for idx, node in enumerate(level_nodes):
                 key = (level, idx)
+                if node.get('color_value', 0):
+                    continue
                 if node_color_weights[key] > 0:
                     node['color_value'] = node_color_sums[key] / node_color_weights[key]
                 elif 'color_value' not in node:
@@ -223,7 +233,7 @@ class InteractiveSankeyWidget(QWidget):
         eff_height = height / self.scale_factor
         
         # Level positions
-        level_width = (eff_width - 2 * self.margin - self.node_width) / (n_levels - 1)
+        level_width = (eff_width - 2 * self.side_margin - self.node_width) / (n_levels - 1) if n_levels > 1 else 0
         
         # Compute node positions
         self.node_rects = {}
@@ -235,7 +245,7 @@ class InteractiveSankeyWidget(QWidget):
             level_nodes = self.nodes[level]
             total_value = sum(max(n.get('value', 1), 1) for n in level_nodes)
             
-            x = self.margin + level * level_width
+            x = self.side_margin + level * level_width
             available_height = eff_height - 2 * self.margin - (len(level_nodes) - 1) * self.node_spacing
             
             y = self.margin
@@ -723,15 +733,15 @@ class InteractiveSankeyWidget(QWidget):
                 
                 # Position label
                 if level == 0:
-                    text_rect = QRectF(0, rect.top(), rect.left() - 10, rect.height())
+                    text_rect = QRectF(2, rect.top(), rect.left() - 6, rect.height())
                     painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, label)
                 elif level == n_levels - 1:
-                    text_rect = QRectF(rect.right() + 10, rect.top(), 200, rect.height())
+                    text_rect = QRectF(rect.right() + 6, rect.top(), self.side_margin - 8, rect.height())
                     painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, label)
                 else:
-                    # Middle labels - show on hover only or if selected
-                    if is_hovered or is_selected:
-                        text_rect = QRectF(rect.left() - 80, rect.top() - 18, 
+                    # Middle labels - always shown (above the node), bold on hover.
+                    if rect.height() >= 8:
+                        text_rect = QRectF(rect.left() - 80, rect.top() - 18,
                                           160 + self.node_width, 16)
                         painter.drawText(text_rect, Qt.AlignCenter, label)
         
@@ -741,13 +751,13 @@ class InteractiveSankeyWidget(QWidget):
         painter.setFont(font)
         
         width = self.width() / self.scale_factor
-        level_width = (width - 2 * self.margin - self.node_width) / (n_levels - 1) if n_levels > 1 else 0
+        level_width = (width - 2 * self.side_margin - self.node_width) / (n_levels - 1) if n_levels > 1 else 0
         
         for level in range(n_levels):
             if level not in self.nodes or not self.nodes[level]:
                 continue
             
-            x = self.margin + level * level_width
+            x = self.side_margin + level * level_width
             field_name = self.nodes[level][0].get('field_name', f'Field {level + 1}')
             
             # Draw background for header
@@ -838,7 +848,7 @@ class OWKFieldsPlot(OWWidget):
     name = "K-Fields Plot"
     description = "Visualize relationships between K bibliometric fields using Sankey diagram"
     icon = "icons/kfields.svg"
-    priority = 96
+    priority = 495
     keywords = ["sankey", "fields", "relationships", "flow", "connections"]
     category = "Biblium"
     
@@ -1050,7 +1060,7 @@ class OWKFieldsPlot(OWWidget):
             
             val_str = str(val)
             
-            for sep in [";", "|"]:
+            for sep in ["||", "|", "; ", ";", ", "]:
                 if sep in val_str:
                     entities = [e.strip() for e in val_str.split(sep) if e.strip()]
                     break
@@ -1124,14 +1134,14 @@ class OWKFieldsPlot(OWWidget):
                 val1_str = str(val1)
                 val2_str = str(val2)
                 
-                for sep in [";", "|"]:
+                for sep in ["||", "|", "; ", ";", ", "]:
                     if sep in val1_str:
                         e1_list = [e.strip() for e in val1_str.split(sep) if e.strip()]
                         break
                 else:
                     e1_list = [val1_str.strip()] if val1_str.strip() else []
                 
-                for sep in [";", "|"]:
+                for sep in ["||", "|", "; ", ";", ", "]:
                     if sep in val2_str:
                         e2_list = [e.strip() for e in val2_str.split(sep) if e.strip()]
                         break

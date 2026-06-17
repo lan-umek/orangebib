@@ -15,19 +15,26 @@ Supports:
 - Open Access Status
 """
 
+import re
 import os
 import logging
-from typing import Optional, List, Any
+from typing import Optional
 
 import numpy as np
+try:
+    import pyqtgraph as pg
+    HAS_PG = True
+except Exception:  # noqa: BLE001
+    pg = None
+    HAS_PG = False
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QRadioButton, QButtonGroup,
-    QLineEdit, QFileDialog,
+    QHBoxLayout, QGridLayout, QLabel, QComboBox,
+    QPushButton, QSpinBox, QDoubleSpinBox, QCheckBox, QTableWidget,
+    QTableWidgetItem, QRadioButton, QButtonGroup, QLineEdit, QTabWidget,
+    QWidget, QVBoxLayout,
+    QFileDialog,
 )
 from AnyQt.QtCore import Qt
 
@@ -38,13 +45,10 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 # Try to import biblium
 try:
-    import biblium
-    from biblium import utilsbib
     HAS_BIBLIUM = True
     try:
         from biblium.representation import (
             compute_relative_representation,
-            SUPPORTED_REFERENCES,
             fetch_openalex_yearly_counts,
             fetch_openalex_country_counts,
             fetch_openalex_sdg_counts,
@@ -110,13 +114,27 @@ COMPARISON_TYPES = {
 # MAIN WIDGET
 # =============================================================================
 
+SDG_FULL_NAMES = {
+    1: "No Poverty", 2: "Zero Hunger", 3: "Good Health and Well-being",
+    4: "Quality Education", 5: "Gender Equality",
+    6: "Clean Water and Sanitation", 7: "Affordable and Clean Energy",
+    8: "Decent Work and Economic Growth",
+    9: "Industry, Innovation and Infrastructure", 10: "Reduced Inequalities",
+    11: "Sustainable Cities and Communities",
+    12: "Responsible Consumption and Production", 13: "Climate Action",
+    14: "Life Below Water", 15: "Life on Land",
+    16: "Peace, Justice and Strong Institutions",
+    17: "Partnerships for the Goals",
+}
+
+
 class OWBenchmarking(OWWidget):
     """Compare dataset against global reference data."""
     
     name = "Benchmarking"
     description = "Compare dataset distributions against global research patterns"
     icon = "icons/benchmarking.svg"
-    priority = 50
+    priority = 680
     keywords = ["benchmark", "comparison", "reference", "global", "representation"]
     category = "Biblium"
     
@@ -130,6 +148,7 @@ class OWBenchmarking(OWWidget):
     
     # Settings
     comparison_type = settings.Setting("Scientific Production (Year)")
+    sdg_show_names = settings.Setting(False)
     reference_source = settings.Setting(0)  # 0=OpenAlex, 1=Custom
     custom_file = settings.Setting("")
     
@@ -153,7 +172,7 @@ class OWBenchmarking(OWWidget):
     class Warning(OWWidget.Warning):
         no_matches = Msg("No matching categories between dataset and reference")
         custom_file_error = Msg("Could not load custom reference file: {}")
-        no_sdg = Msg("No SDG columns found (SDG01-SDG17). Run SDG identification first.")
+        no_sdg = Msg("No SDG columns (SDG1\u201317) found. Run the SDG Identifier widget first, then connect its output here.")
     
     class Information(OWWidget.Information):
         compared = Msg("Compared {:,} categories: {} over, {} under-represented")
@@ -193,6 +212,10 @@ class OWBenchmarking(OWWidget):
         self.desc_label.setWordWrap(True)
         type_box.layout().addWidget(self.desc_label)
         self._update_description()
+        self.sdg_names_cb = QCheckBox("Show SDG names (number + name)")
+        self.sdg_names_cb.setChecked(self.sdg_show_names)
+        self.sdg_names_cb.toggled.connect(self._on_sdg_names_toggled)
+        type_box.layout().addWidget(self.sdg_names_cb)
         
         # Reference Data
         ref_box = gui.widgetBox(self.controlArea, "Reference Data")
@@ -305,16 +328,27 @@ class OWBenchmarking(OWWidget):
         self.summary_label.setWordWrap(True)
         summary_box.layout().addWidget(self.summary_label)
         
-        # Results table
+        # Results: table + plot tabs
         results_box = gui.widgetBox(self.mainArea, "Comparison Results")
+        self.view_tabs = QTabWidget()
         self.results_table = QTableWidget()
         self.results_table.setMinimumHeight(300)
-        results_box.layout().addWidget(self.results_table)
+        self.view_tabs.addTab(self.results_table, "Table")
+        if HAS_PG:
+            self.plot = pg.PlotWidget(background="w")
+            self.plot.showGrid(x=False, y=False, alpha=0.2)
+            self.view_tabs.addTab(self.plot, "Plot")
+        results_box.layout().addWidget(self.view_tabs)
     
     # =========================================================================
     # EVENT HANDLERS
     # =========================================================================
     
+    def _on_sdg_names_toggled(self, checked):
+        self.sdg_show_names = checked
+        if self.auto_apply:
+            self.commit()
+
     def _on_type_changed(self, comparison_type):
         self.comparison_type = comparison_type
         self._update_description()
@@ -445,7 +479,7 @@ class OWBenchmarking(OWWidget):
         try:
             config = COMPARISON_TYPES.get(self.comparison_type, {})
             category = config.get("category", "Year")
-            value_type = config.get("value_type", "single")
+            config.get("value_type", "single")
             
             # Get observed distribution
             observed_df = self._get_observed_distribution(config)
@@ -473,8 +507,18 @@ class OWBenchmarking(OWWidget):
             if self.compute_chi_square and HAS_SCIPY:
                 result_df = self._add_chi_square(result_df)
             
+            if category == "SDG" and self.sdg_show_names and not result_df.empty:
+                def _addname(lbl):
+                    m = re.search(r"(\d{1,2})", str(lbl))
+                    if m:
+                        nme = SDG_FULL_NAMES.get(int(m.group(1)), "")
+                        return f"SDG {int(m.group(1))}: {nme}" if nme else str(lbl)
+                    return str(lbl)
+                result_df = result_df.copy()
+                result_df[result_df.columns[0]] = result_df[result_df.columns[0]].map(_addname)
+
             self._result_df = result_df
-            
+
             # Update display
             self._update_results_display()
             
@@ -552,13 +596,23 @@ class OWBenchmarking(OWWidget):
             self.Warning.no_sdg()
             return None
         
-        # Sum each SDG column
+        # Sum each SDG column. Values may be ints, bools, or strings
+        # ("0"/"1", "True"/"False") depending on how the data was loaded,
+        # so coerce to numeric robustly before summing (avoids str/str ops).
+        def _to_binary(series):
+            num = pd.to_numeric(series, errors="coerce")
+            if num.notna().any():
+                return num.fillna(0)
+            truthy = {"1", "true", "yes", "y", "t"}
+            return (series.astype(str).str.strip().str.lower()
+                    .isin(truthy).astype(int))
+
         sdg_counts = {}
         for col in sorted(sdg_cols):
             sdg_num = int(col[3:])
             sdg_label = f"SDG {sdg_num}"
-            sdg_counts[sdg_label] = self._df[col].sum()
-        
+            sdg_counts[sdg_label] = int(_to_binary(self._df[col]).sum())
+
         return pd.DataFrame(list(sdg_counts.items()), columns=["SDG", "Count"])
     
     def _get_reference_distribution(self, category):
@@ -775,6 +829,52 @@ class OWBenchmarking(OWWidget):
         
         return Table.from_numpy(domain, X, metas=M if metas else None)
     
+    def _render_plot(self, df):
+        """Diverging bar chart of the percentage-point difference per category."""
+        if not HAS_PG or not hasattr(self, "plot"):
+            return
+        self.plot.clear()
+        if df is None or df.empty or "Difference (pp)" not in df.columns:
+            return
+        cat_col = df.columns[0]
+        cfg = COMPARISON_TYPES.get(self.comparison_type, {})
+        is_year = str(cfg.get("category", cat_col)).lower() in ("year", "period")
+        d = df.copy()
+        vals = pd.to_numeric(d["Difference (pp)"], errors="coerce").fillna(0)
+        labels = d[cat_col].astype(str).tolist()
+        if is_year:
+            # chronological, vertical bars
+            order = np.argsort([float(x) if str(x).replace('.', '').isdigit() else 0
+                                for x in labels])
+            xs = list(range(len(order)))
+            v = [float(vals.iloc[i]) for i in order]
+            cats = [labels[i] for i in order]
+            brushes = [pg.mkBrush("#4a90d9") if y >= 0 else pg.mkBrush("#e74c3c") for y in v]
+            self.plot.addItem(pg.BarGraphItem(x0=xs, width=0.7, height=v, y0=0,
+                                              brushes=brushes))
+            self.plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#888")))
+            step = max(1, len(cats) // 12)
+            self.plot.getAxis("bottom").setTicks(
+                [[(i, cats[i]) for i in range(len(cats)) if i % step == 0]])
+            self.plot.setLabel("left", "Difference (pp)")
+            self.plot.setLabel("bottom", str(cat_col))
+        else:
+            # horizontal diverging, largest |difference| first
+            d["_abs"] = vals.abs()
+            d = d.sort_values("_abs", ascending=False).head(25)
+            v = pd.to_numeric(d["Difference (pp)"], errors="coerce").fillna(0).tolist()
+            cats = d[cat_col].astype(str).tolist()
+            order = sorted(range(len(v)), key=lambda i: v[i])
+            v = [v[i] for i in order]; cats = [cats[i] for i in order]
+            ys = list(range(len(v)))
+            brushes = [pg.mkBrush("#4a90d9") if x >= 0 else pg.mkBrush("#e74c3c") for x in v]
+            self.plot.addItem(pg.BarGraphItem(x0=0, y=ys, height=0.6, width=v,
+                                              brushes=brushes))
+            self.plot.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen("#888")))
+            self.plot.getAxis("left").setTicks([[(i, cats[i][:28]) for i in ys]])
+            self.plot.setLabel("bottom", "Difference (pp)")
+            self.plot.setLabel("left", str(cat_col))
+
     def _update_results_display(self):
         """Update the results preview."""
         if self._result_df is None or self._result_df.empty:
@@ -806,7 +906,8 @@ class OWBenchmarking(OWWidget):
             summary_parts.append(f"<b>Chi-square:</b> {chi2:.2f}, p={p_val:.4f}")
         
         self.summary_label.setText("<br>".join(summary_parts))
-        
+        self._render_plot(df)
+
         # Preview table
         self.results_table.setRowCount(len(df))
         self.results_table.setColumnCount(len(df.columns))

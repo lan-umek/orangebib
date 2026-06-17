@@ -12,7 +12,7 @@ Emerging/trending topics appear higher on the plot.
 import logging
 import re
 from typing import Optional, List, Dict
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -101,6 +101,15 @@ class TrendAxisItem(AxisItem):
     def setEntityNames(self, names: List[str]):
         self.entity_names = names
     
+    def tickValues(self, minVal, maxVal, size):
+        if not self.entity_names:
+            return []
+        lo = max(0, int(np.ceil(minVal)))
+        hi = min(len(self.entity_names) - 1, int(np.floor(maxVal)))
+        if hi < lo:
+            return []
+        return [(1.0, [float(i) for i in range(lo, hi + 1)])]
+
     def tickStrings(self, values, scale, spacing):
         strings = []
         for v in values:
@@ -207,39 +216,42 @@ class TrendTopicsPlotGraph(PlotWidget):
             color = cmap.map(cn, mode='qcolor')
             brushes.append(pg.mkBrush(color))
         
-        # Create scatter plot
+        # Interquartile (Q1..Q3) whiskers for each entity
+        for d in data:
+            if d.get("q1") is not None and d.get("q3") is not None:
+                yi = d["entity_idx"]
+                self.addItem(pg.PlotCurveItem(
+                    x=[float(d["q1"]), float(d["q3"])], y=[yi, yi],
+                    pen=pg.mkPen((120, 120, 120, 170), width=2)))
+
+        # Create scatter plot (bubble at the median year)
         self.scatter_item = pg.ScatterPlotItem(
             x=x, y=y,
             size=size_normalized,
             brush=brushes,
             pen=pg.mkPen(QColor(30, 30, 30, 80), width=0.5),
-            hoverable=True,
+            hoverable=False,   # disable pyqtgraph built-in coord tooltip
+            tip=None,
         )
         self.addItem(self.scatter_item)
         
-        # Labels
-        self.setLabel('bottom', 'Year')
-        self.setLabel('left', 'Keyword')
-        
-        if title:
-            self.setTitle(title)
-        
-        # Set view range
-        x_margin = (x.max() - x.min()) * 0.05 if x.max() > x.min() else 5
-        self.setXRange(x.min() - x_margin, x.max() + x_margin)
+        # Labels (user-overridable)
+        self.setLabel('bottom', getattr(self, "_x_label", None) or 'Year')
+        self.setLabel('left', getattr(self, "_y_label", None) or 'Keyword')
+        # plain title (no in-plot legend — it overlapped the points)
+        self.setTitle(title or "Trend Topics")
+
+        # Set view range — include the Q1..Q3 whiskers so they are not clipped
+        xmins = [d["q1"] for d in data if d.get("q1") is not None] + list(x)
+        xmaxs = [d["q3"] for d in data if d.get("q3") is not None] + list(x)
+        xlo, xhi = (min(xmins), max(xmaxs)) if xmins else (x.min(), x.max())
+        x_span = (xhi - xlo) if xhi > xlo else 10
+        self.setXRange(xlo - x_span * 0.05, xhi + x_span * 0.05)
         self.setYRange(-0.5, len(entity_names) - 0.5)
-        
-        # Add color bar
-        self._add_color_bar(cmap, color_values.min(), color_values.max(), color_label)
-        
-        # Add size legend
-        self._add_size_legend(sizes.min(), sizes.max())
     
     def _add_color_bar(self, cmap: ColorMap, vmin: float, vmax: float, label: str):
         """Add color bar to the right side."""
         # Create color bar using gradient
-        bar_width = 20
-        bar_height = 200
         
         # Position in view coordinates
         view_rect = self.getPlotItem().vb.viewRect()
@@ -315,11 +327,15 @@ class TrendTopicsPlotGraph(PlotWidget):
                 nearest_point = point
         
         if min_dist < 0.3 and nearest_point:
+            med = nearest_point.get('median_year', 'N/A')
+            q1 = nearest_point.get('q1'); q3 = nearest_point.get('q3')
+            iqr = (f"{q1:.0f}\u2013{q3:.0f}" if q1 is not None and q3 is not None else "N/A")
             tooltip = (f"<b>{nearest_point['entity_name']}</b><br>"
-                      f"Year: {nearest_point['year']}<br>"
-                      f"Documents: {nearest_point['doc_count']}<br>"
-                      f"Total Citations: {nearest_point.get('total_citations', 0):,}<br>"
-                      f"Median Year: {nearest_point.get('median_year', 'N/A')}")
+                      f"Median year: {med:.0f}<br>" if isinstance(med, (int, float))
+                      else f"<b>{nearest_point['entity_name']}</b><br>Median year: {med}<br>")
+            tooltip += (f"IQR (Q1\u2013Q3): {iqr}<br>"
+                        f"Documents: {nearest_point['doc_count']}<br>"
+                        f"Total Citations: {nearest_point.get('total_citations', 0):,}")
             global_pos = self.mapToGlobal(self.mapFromScene(pos))
             QToolTip.showText(global_pos, tooltip)
         else:
@@ -392,7 +408,7 @@ class OWTrendTopics(OWWidget):
     name = "Trend Topics"
     description = "Analyze trending topics ordered by median publication year"
     icon = "icons/trend_topics.svg"
-    priority = 82
+    priority = 210
     keywords = ["trend", "topic", "emerging", "keyword", "temporal"]
     category = "Biblium"
     
@@ -413,6 +429,9 @@ class OWTrendTopics(OWWidget):
     color_by_index = settings.Setting(0)
     color_map_index = settings.Setting(0)
     show_grid = settings.Setting(False)
+    plot_title = settings.Setting("Trend Topics")
+    x_axis_label = settings.Setting("Year")
+    y_axis_label = settings.Setting("Keyword")
     
     auto_commit = settings.Setting(True)
     
@@ -486,6 +505,12 @@ class OWTrendTopics(OWWidget):
         
         gui.checkBox(opt_box, self, "show_grid", "Show grid",
                      callback=self._update_grid)
+        gui.lineEdit(opt_box, self, "plot_title", label="Title:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
+        gui.lineEdit(opt_box, self, "x_axis_label", label="X label:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
+        gui.lineEdit(opt_box, self, "y_axis_label", label="Y label:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
         
         # Run button
         self.run_btn = gui.button(
@@ -536,9 +561,15 @@ class OWTrendTopics(OWWidget):
         
         self._df = self._table_to_df(data)
         self._columns = list(self._df.columns)
-        
-        self.col_combo.addItems(self._columns)
-        self._suggest_column()
+
+        ent = self._entity_columns()
+        items = ent if ent else self._columns
+        self.col_combo.addItems(items)
+        default = items[0] if items else ""
+        if self.column_name in items:
+            default = self.column_name
+        self.col_combo.setCurrentText(default)
+        self.column_name = default
     
     def _table_to_df(self, table: Table) -> pd.DataFrame:
         data = {}
@@ -550,25 +581,39 @@ class OWTrendTopics(OWWidget):
             data[var.name] = table.get_column(var)
         return pd.DataFrame(data)
     
+    ENTITY_PATTERNS = (
+        "keyword", "author", "countr", "affiliation",
+        "document type", "doctype", "subject", "research area",
+        "institution", "topic", "concept", "sdg", "domain", "field",
+    )
+
+    def _entity_columns(self):
+        if self._df is None:
+            return []
+        out = []
+        for col in self._df.columns:
+            cl = str(col).lower()
+            if cl == "year" or cl.startswith("doi"):
+                continue
+            if any(k in cl for k in self.ENTITY_PATTERNS):
+                out.append(col)
+        seen, res = set(), []
+        for c in out:
+            if c not in seen:
+                seen.add(c)
+                res.append(c)
+        return res
+
     def _suggest_column(self):
-        """Suggest appropriate column."""
-        if not self._columns:
-            return
-        
-        patterns = ["keyword", "author", "source", "affiliation", "country"]
-        
-        for col in self._columns:
-            col_lower = col.lower()
-            for pattern in patterns:
-                if pattern in col_lower:
-                    idx = self._columns.index(col)
-                    self.col_combo.setCurrentIndex(idx)
-                    self.column_name = col
-                    return
+        ent = self._entity_columns()
+        if ent:
+            self.column_name = ent[0]
     
     def _get_year_column(self) -> Optional[str]:
+        cands = ["year", "publication year", "pub year", "pubyear", "py",
+                 "oa_publication_year", "publication_year"]
         for col in self._columns:
-            if col.lower() in ["year", "publication year", "pub year", "pubyear"]:
+            if col.lower() in cands:
                 return col
         return None
     
@@ -648,8 +693,8 @@ class OWTrendTopics(OWWidget):
             
             val_str = str(val)
             
-            # Split by separators
-            for sep in [";", "|"]:
+            # Split by the column's separator (space-variants first).
+            for sep in ["||", "|", "; ", ";", ", "]:
                 if sep in val_str:
                     entities = [e.strip() for e in val_str.split(sep) if e.strip()]
                     break
@@ -670,73 +715,66 @@ class OWTrendTopics(OWWidget):
         
         # Filter by min docs
         filtered_entities = {e: d for e, d in entity_total.items() if d["docs"] >= self.min_docs}
-        
         if len(filtered_entities) < 1:
             self.Error.insufficient_data()
             return
-        
-        # Calculate median year for each entity
-        entity_median_year = {}
+
+        # Per-entity occurrence statistics (median + interquartile range of the
+        # years in which the entity appears, weighted by document count).
+        ent_stats = {}
         for entity in filtered_entities:
-            years = entity_all_years[entity]
-            entity_median_year[entity] = np.median(years)
-        
-        # Select top N per year based on growth/recent appearance
-        # Get unique years from entity appearances
-        all_years = sorted(set(y for years in entity_all_years.values() for y in years))
-        
-        # Select trending topics - those with highest median year (most recent)
-        # Sort entities by median year (descending) to get trending topics
-        sorted_by_median = sorted(entity_median_year.items(), key=lambda x: -x[1])
-        
-        # Take top entities (limit to reasonable number)
-        max_entities = min(len(sorted_by_median), 50)
-        top_trending = sorted_by_median[:max_entities]
-        
-        # Sort them back by median year (ascending) for display (oldest at bottom, newest at top)
-        top_trending_sorted = sorted(top_trending, key=lambda x: x[1])
-        entity_names = [e[0] for e in top_trending_sorted]
-        
-        # Build data points
+            ys = sorted(entity_all_years[entity])
+            med = float(np.median(ys))
+            q1 = float(np.percentile(ys, 25))
+            q3 = float(np.percentile(ys, 75))
+            docs = entity_total[entity]["docs"]
+            cits = entity_total[entity]["citations"]
+            yd = entity_year_data[entity]
+            recent = [y for y in yd if y >= max(yd) - 3]
+            growth = sum(yd[y]["docs"] for y in recent) / docs if docs else 0
+            ent_stats[entity] = {"median": med, "q1": q1, "q3": q3,
+                                 "docs": docs, "cits": cits, "growth": growth}
+
+        # For each (median) year keep the top-k entities whose MEDIAN occurrence
+        # falls in that year (k = Top N per Year).
+        by_median_year = defaultdict(list)
+        for entity, st in ent_stats.items():
+            by_median_year[int(round(st["median"]))].append(entity)
+        selected = []
+        for yr in sorted(by_median_year):
+            ents = sorted(by_median_year[yr],
+                          key=lambda e: -ent_stats[e]["docs"])[:self.top_n_per_year]
+            selected.extend(ents)
+        # display order: by median year ascending (oldest at the bottom)
+        entity_names = sorted(selected, key=lambda e: ent_stats[e]["median"])
+        if not entity_names:
+            self.Error.insufficient_data()
+            return
+
         color_by = COLOR_BY_OPTIONS[self.color_by_index][1]
         trend_data = []
-        
         for entity_idx, entity in enumerate(entity_names):
-            year_data = entity_year_data[entity]
-            median_year = entity_median_year[entity]
-            total_docs = entity_total[entity]["docs"]
-            total_citations = entity_total[entity]["citations"]
-            
-            # Calculate growth rate (docs in last 3 years / total)
-            recent_years = [y for y in year_data.keys() if y >= max(year_data.keys()) - 3]
-            recent_docs = sum(year_data[y]["docs"] for y in recent_years)
-            growth_rate = recent_docs / total_docs if total_docs > 0 else 0
-            
-            for year, yd in year_data.items():
-                doc_count = yd["docs"]
-                citations = yd["citations"]
-                
-                # Calculate color value
-                if color_by == "total_citations":
-                    color_value = citations
-                elif color_by == "citations_per_doc":
-                    color_value = citations / doc_count if doc_count > 0 else 0
-                elif color_by == "doc_count":
-                    color_value = doc_count
-                else:  # growth_rate
-                    color_value = growth_rate
-                
-                trend_data.append({
-                    "entity_idx": entity_idx,
-                    "entity_name": entity,
-                    "year": year,
-                    "doc_count": doc_count,
-                    "total_citations": citations,
-                    "color_value": color_value,
-                    "median_year": median_year,
-                    "growth_rate": growth_rate,
-                })
-        
+            st = ent_stats[entity]
+            if color_by == "total_citations":
+                color_value = st["cits"]
+            elif color_by == "citations_per_doc":
+                color_value = st["cits"] / st["docs"] if st["docs"] else 0
+            elif color_by == "doc_count":
+                color_value = st["docs"]
+            else:  # growth_rate
+                color_value = st["growth"]
+            trend_data.append({
+                "entity_idx": entity_idx,
+                "entity_name": entity,
+                "year": st["median"],          # bubble sits at the median year
+                "doc_count": st["docs"],
+                "total_citations": st["cits"],
+                "color_value": color_value,
+                "median_year": st["median"],
+                "q1": st["q1"], "q3": st["q3"],
+                "growth_rate": st["growth"],
+            })
+
         self._trend_data = trend_data
         
         if len(entity_names) < 5:
@@ -746,12 +784,14 @@ class OWTrendTopics(OWWidget):
         color_map_name = list(COLOR_MAPS.keys())[self.color_map_index]
         color_label = COLOR_BY_OPTIONS[self.color_by_index][0]
         
+        self.graph._x_label = self.x_axis_label
+        self.graph._y_label = self.y_axis_label
         self.graph.plot_trends(
             data=trend_data,
             entity_names=entity_names,
             color_map_name=color_map_name,
             color_label=color_label,
-            title="",
+            title=self.plot_title or "Trend Topics",
             min_size=5,
             max_size=35,
         )

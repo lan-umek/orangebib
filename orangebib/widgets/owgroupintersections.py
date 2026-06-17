@@ -83,6 +83,22 @@ PALETTE = [
     "#ef4444", "#3b82f6", "#22c55e", "#f59e0b", "#8b5cf6",
     "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
 ]
+
+try:
+    from orangebib.base import group_color as _group_color
+except Exception:  # noqa: BLE001
+    _group_color = None
+
+
+def _gcol(groups, i):
+    """Stable per-group colour shared across widgets (fallback to PALETTE)."""
+    try:
+        if _group_color is not None and 0 <= i < len(groups):
+            return _group_color(groups[i])
+    except Exception:  # noqa: BLE001
+        pass
+    return PALETTE[i % len(PALETTE)]
+
 HIGHLIGHT_COLOR = "#ef4444"
 
 
@@ -119,7 +135,7 @@ class OWGroupIntersections(OWWidget):
     name = "Group Intersections"
     description = "Analyze document overlap between groups"
     icon = "icons/group_intersections.svg"
-    priority = 34
+    priority = 630
     keywords = ["group", "intersection", "overlap", "venn", "upset",
                 "heatmap", "network", "dendrogram"]
     category = "Biblium"
@@ -732,7 +748,7 @@ class OWGroupIntersections(OWWidget):
 
         for i, (x, y, g) in enumerate(zip(cx, cy, groups)):
             ax.add_patch(MplCircle((x, y), r, alpha=0.35,
-                         facecolor=PALETTE[i], edgecolor="black", lw=1.5))
+                         facecolor=_gcol(groups, i), edgecolor="black", lw=1.5))
             self._add_circle_hit(x, y, r, g)
 
         self._add_venn_label(ax, cx[0]-0.55, 0, len(s1-s2), {g1}, 15)
@@ -757,7 +773,7 @@ class OWGroupIntersections(OWWidget):
 
         for i in range(3):
             ax.add_patch(MplCircle((cx[i], cy[i]), r, alpha=0.30,
-                         facecolor=PALETTE[i], edgecolor="black", lw=1.5))
+                         facecolor=_gcol(groups, i), edgecolor="black", lw=1.5))
             self._add_circle_hit(cx[i], cy[i], r, groups[i])
 
         self._add_venn_label(ax, cx[0]-0.55, cy[0]+0.45,
@@ -811,7 +827,7 @@ class OWGroupIntersections(OWWidget):
         for i, (ecx, ecy, ew, eh, ea) in enumerate(eparams):
             ax.add_patch(MplEllipse(
                 (ecx, ecy), ew, eh, angle=ea, alpha=0.22,
-                facecolor=PALETTE[i], edgecolor="black", lw=1.3))
+                facecolor=_gcol(groups, i), edgecolor="black", lw=1.3))
             self._add_ellipse_hit(ecx, ecy, ew, eh, ea, g[i])
 
         # ---- Sample a grid to find centroid of each region ----
@@ -868,8 +884,8 @@ class OWGroupIntersections(OWWidget):
             (eparams[2][0] - 1.2, eparams[2][1] - 1.4),
             (eparams[3][0] + 1.2, eparams[3][1] - 1.4),
         ]
-        for i, (nx, ny) in enumerate(name_pos):
-            ax.text(nx, ny, f"{g[i]}\n(n={len(ss[i])})",
+        for i, (xpos, ypos) in enumerate(name_pos):
+            ax.text(xpos, ypos, f"{g[i]}\n(n={len(ss[i])})",
                     ha="center", fontsize=10, fontweight="bold",
                     color=PALETTE[i])
 
@@ -900,7 +916,7 @@ class OWGroupIntersections(OWWidget):
         for i, (ecx, ecy, w, h, ea) in enumerate(eparams):
             ax.add_patch(MplEllipse(
                 (ecx, ecy), w, h, angle=ea, alpha=0.20,
-                facecolor=PALETTE[i], edgecolor="black", lw=1.2))
+                facecolor=_gcol(groups, i), edgecolor="black", lw=1.2))
             self._add_ellipse_hit(ecx, ecy, w, h, ea, g[i])
 
         # ---- Grid-sample to find region centroids ----
@@ -1173,7 +1189,6 @@ class OWGroupIntersections(OWWidget):
                     return m[method]
             except Exception:
                 pass
-        n = len(groups)
         mat = pd.DataFrame(0.0, index=groups, columns=groups)
         for i, g1 in enumerate(groups):
             s1 = set(gm.index[gm[g1].astype(bool)])
@@ -1382,7 +1397,7 @@ class OWGroupIntersections(OWWidget):
 
     def _fill_info(self, df):
         groups, gm = self._group_names, self._gm_df
-        L = [f"<h3>Group Intersections Summary</h3>",
+        L = ["<h3>Group Intersections Summary</h3>",
              f"<b>Groups:</b> {len(groups)}<br>",
              f"<b>Documents:</b> {len(gm)}<br>",
              f"<b>Intersections:</b> {len(df)}<br>"]

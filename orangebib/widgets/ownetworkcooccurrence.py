@@ -16,8 +16,8 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 
-from AnyQt.QtCore import Qt
-from AnyQt.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+from AnyQt.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QWidget,
+                             QPlainTextEdit, QPushButton, QFileDialog)
 
 from Orange.data import Table, Domain, StringVariable, ContinuousVariable, DiscreteVariable
 from Orange.widgets import gui, settings
@@ -25,6 +25,55 @@ from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 logger = logging.getLogger(__name__)
+
+
+def split_items(value, is_author=False):
+    """Split a list-valued cell into items. Handles ';', '|', '/', newline and,
+    for authors without a delimiter, the space-separated "Surname, Given" form."""
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return []
+    for d in ["||", "|", "; ", ";", "\n", "\t", " / ", "/"]:
+        if d in s:
+            return [x.strip() for x in s.split(d) if x.strip()]
+    if is_author and "," in s:
+        parts = re.split(r"(?<=\S)\s+(?=[A-Z\u00C0-\u024F][\w'.\-]*,)", s)
+        parts = [x.strip() for x in parts if x.strip()]
+        return parts if len(parts) > 1 else [s]
+    return [s]
+
+
+def parse_thesaurus_text(text):
+    """Parse synonym rules into {variant_lower: canonical}.
+
+    Accepted per-line formats:
+      variant1; variant2 => canonical
+      variant1; variant2 -> canonical
+      canonical: variant1; variant2
+      canonical = variant1; variant2
+    """
+    mapping = {}
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        canonical, variants = None, []
+        if "=>" in line or "->" in line:
+            sep = "=>" if "=>" in line else "->"
+            left, right = line.split(sep, 1)
+            canonical = right.strip()
+            variants = [v.strip() for v in re.split(r"[;,]", left) if v.strip()]
+        elif ":" in line or "=" in line:
+            sep = ":" if ":" in line else "="
+            left, right = line.split(sep, 1)
+            canonical = left.strip()
+            variants = [v.strip() for v in re.split(r"[;,]", right) if v.strip()]
+        if not canonical:
+            continue
+        mapping[canonical.lower()] = canonical
+        for v in variants:
+            mapping[v.lower()] = canonical
+    return mapping
 
 # Try to import Orange Network
 try:
@@ -85,21 +134,13 @@ class NetworkBuilder:
                     return col
         return None
     
-    def _extract_entities(self, column: str) -> Dict[int, List[str]]:
+    def _extract_entities(self, column: str, is_author: bool = False) -> Dict[int, List[str]]:
         doc_entities = {}
         for idx in range(len(self.df)):
             val = self.df.iloc[idx][column]
             if pd.isna(val):
                 continue
-            val_str = str(val).strip()
-            if not val_str:
-                continue
-            if ";" in val_str:
-                entities = [e.strip() for e in val_str.split(";") if e.strip()]
-            elif "|" in val_str:
-                entities = [e.strip() for e in val_str.split("|") if e.strip()]
-            else:
-                entities = [val_str]
+            entities = split_items(val, is_author=is_author)
             if entities:
                 doc_entities[idx] = entities
         return doc_entities
@@ -127,7 +168,22 @@ class NetworkBuilder:
                        min_occ: int = 2, min_edge: int = 1,
                        include_set: Set[str] = None, exclude_set: Set[str] = None,
                        include_regex: str = None, exclude_regex: str = None,
-                       normalize: bool = False):
+                       normalize: bool = False, synonyms: dict = None):
+        
+        if synonyms:
+            mapped = {}
+            for k, ents in doc_entities.items():
+                new_ents = []
+                for e in ents:
+                    new_ents.append(synonyms.get(e.strip().lower(), e))
+                # de-duplicate within a document after merging synonyms
+                seen, uniq = set(), []
+                for e in new_ents:
+                    kl = e.lower()
+                    if kl not in seen:
+                        seen.add(kl); uniq.append(e)
+                mapped[k] = uniq
+            doc_entities = mapped
         
         entity_counts = Counter()
         for entities in doc_entities.values():
@@ -287,7 +343,7 @@ class NetworkBuilder:
               min_edge: int = 1, include_set: Set[str] = None, 
               exclude_set: Set[str] = None, include_regex: str = None,
               exclude_regex: str = None, normalize: bool = False, 
-              ngram_n: int = 2):
+              ngram_n: int = 2, synonyms: dict = None):
         """Build network of specified type."""
         
         kwargs = {
@@ -299,6 +355,7 @@ class NetworkBuilder:
             'include_regex': include_regex,
             'exclude_regex': exclude_regex,
             'normalize': normalize,
+            'synonyms': synonyms,
         }
         
         if network_type == "author_keywords":
@@ -340,7 +397,7 @@ class NetworkBuilder:
             col = self._find_column("Authors", "AU", "Author")
             if not col:
                 return [], np.array([]), {'error': 'Authors not found'}
-            return self._build_network(self._extract_entities(col), **kwargs)
+            return self._build_network(self._extract_entities(col, is_author=True), **kwargs)
         
         elif network_type == "co_citation":
             col = self._find_column("References", "Cited References", "CR")
@@ -399,7 +456,7 @@ class OWNetworkCooccurrence(OWWidget):
     name = "Network Co-occurrence"
     description = "Build co-occurrence networks from bibliographic data"
     icon = "icons/network.svg"
-    priority = 100
+    priority = 400
     keywords = ["network", "cooccurrence", "collaboration", "keywords"]
     category = "Biblium"
     
@@ -421,6 +478,7 @@ class OWNetworkCooccurrence(OWWidget):
     min_edge_weight = settings.Setting(1)
     normalize_weights = settings.Setting(False)
     ngram_n = settings.Setting(2)
+    synonyms_text = settings.Setting("")
     
     want_main_area = False
     
@@ -442,6 +500,7 @@ class OWNetworkCooccurrence(OWWidget):
         self._data = None
         self._df = None
         self._columns = []
+        self._excel_synonyms = {}
         self._setup_gui()
     
     def _setup_gui(self):
@@ -495,6 +554,24 @@ class OWNetworkCooccurrence(OWWidget):
         gui.checkBox(box, self, "normalize_weights", "Normalize weights",
                      callback=self._on_change)
         
+        # Thesaurus / synonyms
+        box = gui.widgetBox(self.controlArea, "Thesaurus / Synonyms")
+        gui.widgetLabel(box, "Rules (one per line):  variant1; variant2 => canonical")
+        self.synonyms_edit = QPlainTextEdit()
+        self.synonyms_edit.setPlaceholderText(
+            "covid-19; sars-cov-2 => COVID-19\nh index; h-index => h-index")
+        self.synonyms_edit.setPlainText(self.synonyms_text)
+        self.synonyms_edit.setMaximumHeight(90)
+        self.synonyms_edit.textChanged.connect(self._on_synonyms_text)
+        box.layout().addWidget(self.synonyms_edit)
+        row = QHBoxLayout()
+        btn = QPushButton("Load from Excel\u2026")
+        btn.clicked.connect(self._load_synonyms_excel)
+        row.addWidget(btn)
+        self.syn_status = QLabel("")
+        row.addWidget(self.syn_status)
+        w = QWidget(); w.setLayout(row); box.layout().addWidget(w)
+
         # Build button
         gui.button(self.controlArea, self, "Build Network", callback=self._do_commit)
         
@@ -510,6 +587,44 @@ class OWNetworkCooccurrence(OWWidget):
     def _on_filter(self):
         self.include_filter = self.include_edit.text()
         self.exclude_filter = self.exclude_edit.text()
+
+    def _on_synonyms_text(self):
+        self.synonyms_text = self.synonyms_edit.toPlainText()
+
+    def _load_synonyms_excel(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load thesaurus", "", "Excel/CSV (*.xlsx *.xls *.csv)")
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                tdf = pd.read_csv(path)
+            else:
+                tdf = pd.read_excel(path)
+        except Exception as e:  # noqa: BLE001
+            self.syn_status.setText(f"Load error: {e}")
+            return
+        mapping = {}
+        cols = list(tdf.columns)
+        if len(cols) >= 2:
+            # VOSviewer style: col0 = label, col1 = replace by (canonical)
+            var_c, can_c = cols[0], cols[1]
+            for _, r in tdf.iterrows():
+                variant = str(r[var_c]).strip()
+                canonical = str(r[can_c]).strip()
+                if not variant or variant.lower() == "nan":
+                    continue
+                if not canonical or canonical.lower() == "nan":
+                    canonical = variant
+                mapping[variant.lower()] = canonical
+                mapping[canonical.lower()] = canonical
+        self._excel_synonyms = mapping
+        self.syn_status.setText(f"{len(mapping)} mappings loaded")
+
+    def _build_synonyms_dict(self):
+        mapping = dict(self._excel_synonyms)
+        mapping.update(parse_thesaurus_text(self.synonyms_text))
+        return mapping or None
     
     @Inputs.data
     def set_data(self, data):
@@ -581,6 +696,7 @@ class OWNetworkCooccurrence(OWWidget):
                 exclude_regex=exc_re,
                 normalize=self.normalize_weights,
                 ngram_n=self.ngram_n,
+                synonyms=self._build_synonyms_dict(),
             )
             
             if 'error' in props:

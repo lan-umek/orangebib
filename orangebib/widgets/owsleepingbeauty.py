@@ -9,6 +9,7 @@ Requires OpenAlex data processed through Biblium.
 """
 
 import logging
+from datetime import datetime
 from typing import Optional, List
 
 import numpy as np
@@ -20,7 +21,6 @@ from AnyQt.QtWidgets import (
     QGroupBox, QTableWidget, QTableWidgetItem,
     QFileDialog, QMessageBox,
 )
-from AnyQt.QtCore import Qt
 
 from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -80,7 +80,7 @@ class OWSleepingBeauty(OWWidget):
     name = "Sleeping Beauty"
     description = "Detect papers with delayed recognition (dormant period followed by awakening)"
     icon = "icons/sleeping_beauty.svg"
-    priority = 69
+    priority = 345
     keywords = ["sleeping beauty", "delayed recognition", "citation", "awakening", "beauty coefficient"]
     category = "Biblium"
     
@@ -96,7 +96,7 @@ class OWSleepingBeauty(OWWidget):
     min_sleep_duration = settings.Setting(3)
     min_total_citations = settings.Setting(30)
     min_awakening_intensity = settings.Setting(1.5)
-    current_year = settings.Setting(2025)
+    current_year = settings.Setting(datetime.now().year)
     auto_apply = settings.Setting(False)
     
     want_main_area = True
@@ -138,7 +138,7 @@ class OWSleepingBeauty(OWWidget):
             f"(dormant period followed by awakening)<br>"
             f"<i>{status}</i></small>"
         )
-        info_label.setStyleSheet("color: #7c3aed; background-color: #ede9fe; padding: 8px; border-radius: 4px;")
+        info_label.setStyleSheet("color: #2563eb; background-color: #dbeafe; padding: 8px; border-radius: 4px;")
         info_box.layout().addWidget(info_label)
         
         # Detection Parameters (matching Biblium's parameters)
@@ -205,7 +205,7 @@ class OWSleepingBeauty(OWWidget):
             callback=self.commit, autoDefault=False
         )
         self.run_btn.setMinimumHeight(40)
-        self.run_btn.setStyleSheet("background-color: #7c3aed; color: white; font-weight: bold;")
+        self.run_btn.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold;")
         
         gui.checkBox(self.controlArea, self, "auto_apply", "Auto apply")
         
@@ -260,7 +260,7 @@ class OWSleepingBeauty(OWWidget):
             stats_layout.addWidget(lbl, row * 2, col)
             
             val_lbl = QLabel(default)
-            val_lbl.setStyleSheet("font-size: 18px; color: #7c3aed;")
+            val_lbl.setStyleSheet("font-size: 18px; color: #2563eb;")
             stats_layout.addWidget(val_lbl, row * 2 + 1, col)
             self.stat_labels[key] = val_lbl
         
@@ -489,12 +489,63 @@ class OWSleepingBeauty(OWWidget):
         self.results_table.setSortingEnabled(True)
         self.export_btn.setEnabled(True)
     
+    def _results_with_source(self):
+        """Merge SB metrics back onto the original article rows (so the output
+        carries every column: original + OpenAlex-enriched + SB metrics)."""
+        res = self._results_df
+        df = self._df
+        if res is None or res.empty or df is None or df.empty:
+            return None
+        title_col = next((c for c in ["Title", "title", "TI", "Document Title"]
+                          if c in df.columns), None)
+        if not title_col or "title" not in res.columns:
+            return None
+        sb_cols = [c for c in ["beauty_coefficient", "sleep_duration",
+                               "awakening_year", "total_citations",
+                               "max_citations_in_year", "awakening_intensity",
+                               "publication_year"] if c in res.columns]
+        d = df.copy()
+        r = res.copy()
+        d["_k"] = d[title_col].astype(str).str.strip().str.lower()
+        r["_k"] = r["title"].astype(str).str.strip().str.lower()
+        r = r[["_k"] + sb_cols].rename(columns={c: f"sb_{c}" for c in sb_cols})
+        out = d.merge(r, on="_k", how="inner").drop(columns=["_k"])
+        out = out.drop_duplicates(subset=[title_col]).reset_index(drop=True)
+        return out if not out.empty else None
+
+    @staticmethod
+    def _generic_table(df):
+        if df is None or df.empty:
+            return None
+        attrs, metas, ac, mc = [], [], [], []
+        for c in df.columns:
+            if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c]):
+                attrs.append(ContinuousVariable(str(c))); ac.append(c)
+            else:
+                metas.append(StringVariable(str(c))); mc.append(c)
+        domain = Domain(attrs, metas=metas)
+        n = len(df)
+        X = np.empty((n, len(attrs)))
+        for i, c in enumerate(ac):
+            X[:, i] = pd.to_numeric(df[c], errors="coerce").values
+        M = np.empty((n, len(metas)), dtype=object)
+        for i, c in enumerate(mc):
+            M[:, i] = [("" if (v is None or (isinstance(v, float) and v != v))
+                        else str(v)) for v in df[c]]
+        return Table.from_numpy(domain, X, metas=M)
+
     def _send_outputs_from_results(self):
         """Create and send output tables."""
         if self._results_df is None or self._results_df.empty:
             self._send_outputs(None)
             return
-        
+
+        # Preferred: full article data (original + enriched) + SB metrics.
+        full = self._results_with_source()
+        if full is not None:
+            self._send_outputs(self._generic_table(full))
+            return
+
         # Create Orange table with Biblium's output columns
         attrs = [
             ContinuousVariable("publication_year"),

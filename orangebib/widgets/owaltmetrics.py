@@ -11,18 +11,16 @@ Supports:
 """
 
 import logging
-import random
-from typing import Optional, List, Dict, Tuple
-from collections import Counter
+from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QColor, QFont
+from AnyQt.QtGui import QColor
 from AnyQt.QtWidgets import (QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
                               QLabel, QTableWidget, QTableWidgetItem, QGridLayout,
-                              QFrame, QHeaderView, QScrollArea, QPushButton)
+                              QFrame, QHeaderView, QScrollArea)
 
 import pyqtgraph as pg
 
@@ -347,9 +345,10 @@ class SourceBreakdownPlot(PlotWidget):
         self.clear_plot()
         
         # Filter non-zero sources and sort
-        sources = [(name, count, color) for name, col, color in ALTMETRIC_SOURCES 
+        sources = [(name, source_totals[name], color)
+                   for name, _col, color in ALTMETRIC_SOURCES
                    if name in source_totals and source_totals[name] > 0]
-        sources.sort(key=lambda x: -source_totals[x[0]])
+        sources.sort(key=lambda x: -x[1])
         
         if not sources:
             return
@@ -357,10 +356,8 @@ class SourceBreakdownPlot(PlotWidget):
         names = [s[0] for s in sources]
         counts = [source_totals[s[0]] for s in sources]
         colors = [s[2] for s in sources]
-        
-        x = np.arange(len(names))
-        
-        for i, (name, count, color) in enumerate(zip(names, counts, colors)):
+
+        for i, (_name, count, color) in enumerate(zip(names, counts, colors)):
             bar = pg.BarGraphItem(
                 x=[i], height=[count], width=0.7,
                 brush=pg.mkBrush(color),
@@ -478,10 +475,8 @@ class CoveragePlot(PlotWidget):
         names = [c[0] for c in coverage_data]
         coverages = [c[1] for c in coverage_data]
         colors = [c[2] for c in coverage_data]
-        
-        x = np.arange(len(names))
-        
-        for i, (name, cov, color) in enumerate(zip(names, coverages, colors)):
+
+        for i, (_name, cov, color) in enumerate(zip(names, coverages, colors)):
             bar = pg.BarGraphItem(
                 x=[i], height=[cov], width=0.7,
                 brush=pg.mkBrush(color),
@@ -507,7 +502,7 @@ class OWAltmetrics(OWWidget):
     name = "Altmetrics Analysis"
     description = "Analyze alternative impact metrics beyond citations"
     icon = "icons/altmetrics.svg"
-    priority = 95
+    priority = 800
     keywords = ["altmetric", "impact", "social", "twitter", "mendeley", "attention"]
     category = "Biblium"
     
@@ -977,9 +972,6 @@ class OWAltmetrics(OWWidget):
             return
         
         # Full altmetric data
-        # Create Orange Table
-        alt_cols = ['altmetric_score', 'has_attention'] + [col for _, col, _ in ALTMETRIC_SOURCES if col in self._altmetric_df.columns]
-        
         # Combine with original columns
         combined_df = self._altmetric_df.copy()
         

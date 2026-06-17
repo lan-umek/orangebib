@@ -24,7 +24,6 @@ Ctrl+Click extends selection; plain click replaces.
 import logging
 import re
 from typing import Optional, List, Set, Tuple
-from collections import Counter
 from itertools import combinations
 
 import numpy as np
@@ -33,18 +32,17 @@ import pandas as pd
 from AnyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QPushButton, QSpinBox, QDoubleSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QAbstractItemView, QTabWidget,
-    QSplitter, QFrame, QLineEdit, QFileDialog, QApplication,
-    QToolButton, QToolTip,
+    QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
+    QSizePolicy, QAbstractItemView, QTabWidget, QSplitter,
+    QFrame, QLineEdit, QFileDialog, QApplication, QToolButton,
+    QToolTip,
 )
 from AnyQt.QtCore import Qt, QThread, pyqtSignal, QPoint
-from AnyQt.QtGui import QColor, QFont
 
 from Orange.data import (
     Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable,
 )
-from Orange.widgets import gui, settings
+from Orange.widgets import gui
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.settings import Setting
 
@@ -69,7 +67,6 @@ except ImportError:
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from matplotlib.figure import Figure
-    import matplotlib.colors as mcolors
     import matplotlib.patches as mpatches
     HAS_MPL = True
 except ImportError:
@@ -224,7 +221,7 @@ class OWGroupAssociations(OWWidget):
         "bipartite and Sankey visualisations"
     )
     icon = "icons/group_associations.svg"
-    priority = 35
+    priority = 640
     keywords = [
         "group", "association", "entity", "contingency", "chi-square",
         "diversity", "correspondence", "svd", "log-ratio", "heatmap",
@@ -259,6 +256,7 @@ class OWGroupAssociations(OWWidget):
     exclude_patterns_text = Setting("")
     auto_apply = Setting(True)
     viz_type_idx = Setting(0)
+    heatmap_cmap = Setting("viridis")
     min_abs_residual = Setting(0.0)
     splitter_state = Setting(b"")
 
@@ -477,7 +475,15 @@ class OWGroupAssociations(OWWidget):
         self.viz_combo = QComboBox(); self.viz_combo.addItems(VIZ_NAMES)
         self.viz_combo.setCurrentIndex(self.viz_type_idx)
         self.viz_combo.currentIndexChanged.connect(self._on_viz_changed)
-        vh.addWidget(self.viz_combo); vh.addStretch()
+        vh.addWidget(self.viz_combo)
+        vh.addWidget(QLabel("Colormap:"))
+        self.cmap_combo = QComboBox()
+        self.cmap_combo.addItems(["viridis", "plasma", "magma", "cividis",
+                                  "YlOrRd", "Blues", "Greens", "coolwarm"])
+        self.cmap_combo.setCurrentText(self.heatmap_cmap)
+        self.cmap_combo.currentTextChanged.connect(self._on_cmap_changed)
+        vh.addWidget(self.cmap_combo)
+        vh.addStretch()
         self.sel_label = QLabel("")
         self.sel_label.setStyleSheet("color:#6366f1;font-size:11px;")
         vh.addWidget(self.sel_label)
@@ -576,6 +582,10 @@ class OWGroupAssociations(OWWidget):
         cfg = list(ENTITY_CONFIGS.values())[self.entity_type_idx]
         self.entity_desc.setText(cfg["description"])
 
+    def _on_cmap_changed(self, t):
+        self.heatmap_cmap = t
+        self._update_visualization()
+
     def _on_viz_changed(self, idx):
         self.viz_type_idx = idx
         self._update_visualization()
@@ -652,7 +662,11 @@ class OWGroupAssociations(OWWidget):
         div_df = self._calc_diversity(mat, groups) if self.compute_diversity else None
         ca_df = (self._calc_ca(mat, items, groups, label)
                  if self.compute_ca and min(mat.shape) >= 2 else None)
-        chi_df = (self._calc_chi_square(mat, items, groups, label)
+        P, Gmat = None, None
+        if self.compute_chi and HAS_SCIPY:
+            P, Gmat = self._doc_level_matrices(df, gm, groups, entity_col,
+                                               items, vt, sep)
+        chi_df = (self._calc_chi_square(mat, items, groups, label, P, Gmat)
                   if self.compute_chi and HAS_SCIPY else None)
         svd_df = self._calc_svd(mat, items, groups, label) if self.compute_svd else None
         lr_df = (self._calc_logratio(mat, items, groups, label)
@@ -676,6 +690,53 @@ class OWGroupAssociations(OWWidget):
         pv = pv[groups]; pv["Total"] = pv.sum(axis=1)
         pv = pv.sort_values("Total", ascending=False).reset_index()
         return pv[pv["Total"] >= self.min_freq].head(self.top_n).reset_index(drop=True)
+
+    def _doc_level_matrices(self, df, gm, groups, ecol, items, vtype, sep):
+        """Build a document x entity presence matrix (for the given items) and a
+        document x group membership matrix, used for an overlap-aware
+        permutation test. Returns (P, Gmat) or (None, None) if not applicable."""
+        if vtype not in ("list", "categorical") or ecol not in df.columns:
+            return None, None
+        item_index = {it: k for k, it in enumerate(items)}
+        n, m = len(df), len(items)
+        P = np.zeros((n, m), dtype=float)
+        for ri, (_, val) in enumerate(df[ecol].items()):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                continue
+            sx = str(val).strip()
+            if not sx or sx.lower() == "nan":
+                continue
+            toks = ([t.strip() for t in sx.split(sep)] if vtype == "list" else [sx])
+            for t in toks:
+                k = item_index.get(t)
+                if k is not None:
+                    P[ri, k] = 1.0
+        try:
+            Gmat = gm[groups].astype(float).values
+        except Exception:  # noqa: BLE001
+            return None, None
+        return P, Gmat
+
+    def _perm_overlap(self, P, Gmat, n_perm=999):
+        """Per-entity permutation p-values that respect overlapping group
+        membership: permute whole document group-membership rows so each
+        document keeps its full (possibly multiple) group set."""
+        n, m = P.shape
+        gsize = Gmat.sum(0)
+        item_tot = P.sum(0)
+        # expected per group under independence of presence and membership
+        exp = np.outer(item_tot, gsize) / max(n, 1)
+        exp_safe = np.where(exp > 0, exp, 1.0)
+        obs_counts = P.T @ Gmat
+        obs_stat = ((obs_counts - exp) ** 2 / exp_safe).sum(1)
+        rng = np.random.default_rng(42)
+        ge = np.zeros(m)
+        for _ in range(n_perm):
+            perm = rng.permutation(n)
+            c = P.T @ Gmat[perm]
+            st = ((c - exp) ** 2 / exp_safe).sum(1)
+            ge += (st >= obs_stat)
+        return (ge + 1) / (n_perm + 1)
 
     def _extract_entities(self, df, ecol, vtype, sep):
         if ecol not in df.columns: return []
@@ -759,15 +820,44 @@ class OWGroupAssociations(OWWidget):
         return df
 
     # ── chi-square ──
-    def _calc_chi_square(self, mat, items, groups, elabel):
+    def _calc_chi_square(self, mat, items, groups, elabel, P=None, Gmat=None):
         if not HAS_SCIPY: return None
         try: chi2, pv, dof, exp = sp_stats.chi2_contingency(mat)
         except ValueError: return None
         contrib = (mat - exp) ** 2 / np.where(exp > 0, exp, 1)
         rchi = contrib.sum(1)
+        # Per-entity Monte-Carlo permutation p-value: does this entity's
+        # distribution across groups deviate more than chance, given the
+        # group sizes? (Robust alternative to relying on chi-square residuals.)
+        # Overlap-aware permutation (preferred): permute document group rows so
+        # documents in several groups keep their full membership. Falls back to
+        # a multinomial allocation model only when doc-level data is missing.
+        perm_p = np.ones(len(items))
+        if P is not None and Gmat is not None and P.shape[1] == len(items) \
+                and Gmat.shape[1] > 1:
+            try:
+                perm_p = self._perm_overlap(P, Gmat)
+            except Exception:  # noqa: BLE001
+                perm_p = np.ones(len(items))
+        else:
+            col_sums = mat.sum(0); total = float(col_sums.sum())
+            if total > 0 and mat.shape[1] > 1:
+                pvec = col_sums / total
+                rng = np.random.default_rng(42)
+                N = 999
+                for i in range(len(items)):
+                    ti = int(round(mat[i].sum()))
+                    if ti <= 0:
+                        continue
+                    exp_i = ti * pvec
+                    obs = float(((mat[i] - exp_i) ** 2 / np.where(exp_i > 0, exp_i, 1)).sum())
+                    sims = rng.multinomial(ti, pvec, size=N)
+                    sim_stat = ((sims - exp_i) ** 2 / np.where(exp_i > 0, exp_i, 1)).sum(1)
+                    perm_p[i] = (np.sum(sim_stat >= obs) + 1) / (N + 1)
         rows = []
         for i, it in enumerate(items):
-            row = {elabel: it, "Chi-square contribution": round(float(rchi[i]), 4)}
+            row = {elabel: it, "Chi-square contribution": round(float(rchi[i]), 4),
+                   "Perm. p-value": round(float(perm_p[i]), 4)}
             for j, g in enumerate(groups):
                 row[f"{g} Observed"] = int(mat[i, j])
                 row[f"{g} Expected"] = round(float(exp[i, j]), 2)
@@ -857,23 +947,25 @@ class OWGroupAssociations(OWWidget):
         ni, ng = mat.shape
         rs = mat.sum(1, keepdims=True); rs[rs == 0] = 1; normed = mat / rs
         ax = self.fig.add_subplot(111)
-        im = ax.imshow(normed, aspect="auto", cmap="YlOrRd",
+        im = ax.imshow(normed, aspect="auto", cmap=self.heatmap_cmap,
                         vmin=0, vmax=max(normed.max() * 1.05, .01),
                         interpolation="nearest")
+        _thr = normed.max() * .55
         for i in range(ni):
             for j in range(ng):
-                c = "white" if normed[i, j] > normed.max() * .65 else "black"
+                c = "black" if normed[i, j] > _thr else "white"
                 ax.text(j, i, str(int(mat[i, j])), ha="center", va="center",
                         fontsize=8, color=c, fontweight="bold")
         ax.set_xticks(range(ng)); ax.set_xticklabels(groups, fontsize=10, fontweight="bold")
         ax.set_yticks(range(ni)); ax.set_yticklabels(
             items, fontsize=max(6, min(9, 300 // max(ni, 1))))
         ax.tick_params(axis="x", top=True, labeltop=True, bottom=False, labelbottom=False)
-        for idx in self._selected_entities:
-            if 0 <= idx < ni:
-                ax.add_patch(mpatches.FancyBboxPatch(
-                    (-.5, idx-.5), ng, 1, boxstyle="round,pad=.02",
-                    lw=2.5, ec="#6366f1", fc="none", zorder=10))
+        for (en, gn) in self._selected_cells:
+            if en in items and gn in groups:
+                i = items.index(en); j = groups.index(gn)
+                ax.add_patch(mpatches.Rectangle(
+                    (j - .5, i - .5), 1, 1, lw=2.5, ec="#6366f1",
+                    fc="none", zorder=10))
         if 0 <= self._hover_idx < ni:
             ax.axhspan(self._hover_idx-.5, self._hover_idx+.5,
                         color="#fbbf24", alpha=.15, zorder=1)
@@ -935,7 +1027,7 @@ class OWGroupAssociations(OWWidget):
 
     # ── 2  Balloon Plot (cell-level selection, residual threshold) ──
     def _draw_balloon(self):
-        chi = self._chi_df; cont = self._contingency_df
+        chi = self._chi_df
         groups = self._group_names; label = self._entity_label
         ax = self.fig.add_subplot(111)
         if chi is None or chi.empty:
@@ -1125,7 +1217,7 @@ class OWGroupAssociations(OWWidget):
                 gc = _GROUP_COLOURS[j % len(_GROUP_COLOURS)]
                 is_sel = (items[i], groups[j]) in self._selected_cells
                 alp = .75 if is_sel else .35
-                elw = 1.5 if is_sel else 0
+                1.5 if is_sel else 0
 
                 # S-curve band
                 n_pts = 60; t = np.linspace(0, 1, n_pts)
@@ -1320,7 +1412,12 @@ class OWGroupAssociations(OWWidget):
         vt = meta.get("type")
         ctrl = bool(QApplication.keyboardModifiers() & Qt.ControlModifier)
 
-        if vt in ("heatmap", "bipartite"):
+        if vt == "heatmap":
+            cell = self._hit_heatmap_cell(event, meta)
+            if cell is None: return
+            self._toggle_cell(cell, ctrl)
+
+        elif vt == "bipartite":
             idx = self._hit_entity(event, meta)
             if idx < 0: return
             self._toggle_entity(idx, ctrl)
@@ -1344,6 +1441,16 @@ class OWGroupAssociations(OWWidget):
         self._sync_table_selection()
         self._update_sel_label()
         self._send_selected_documents()
+
+    def _hit_heatmap_cell(self, event, meta):
+        x, y = event.xdata, event.ydata
+        if x is None or y is None:
+            return None
+        j = int(round(x)); i = int(round(y))
+        items, groups = meta["items"], meta["groups"]
+        if 0 <= i < len(items) and 0 <= j < len(groups):
+            return (items[i], groups[j])
+        return None
 
     def _hit_entity(self, event, meta):
         """Hit-test for entity index in heatmap or bipartite."""
@@ -1389,7 +1496,7 @@ class OWGroupAssociations(OWWidget):
         for b in meta["bands"]:
             yt = b["lt"] + (b["rt"] - b["lt"]) * h
             yb = b["lb"] + (b["rb"] - b["lb"]) * h
-            if yb <= y <= yt:
+            if min(yt, yb) <= y <= max(yt, yb):
                 return (b["entity"], b["group"])
         return None
 
@@ -1414,7 +1521,7 @@ class OWGroupAssociations(OWWidget):
                 tw.selectRow(idx)
         # For cell selection, highlight matching entity rows
         if self._selected_cells and self._contingency_df is not None:
-            label = self._entity_label
+            self._entity_label
             sel_names = {c[0] for c in self._selected_cells}
             for r in range(tw.rowCount()):
                 item = tw.item(r, 0)

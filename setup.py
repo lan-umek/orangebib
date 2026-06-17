@@ -9,10 +9,10 @@ Bibliometric analysis add-on for Orange data mining suite.
 from setuptools import setup, find_packages
 
 NAME = "Orange3-Biblium"
-VERSION = "0.1.0"
-DESCRIPTION = "Bibliometric analysis widgets for Orange (powered by Biblium)"
+VERSION = "0.2.3"
+DESCRIPTION = "Bibliometric analysis widgets for Orange (powered by Biblium 2.16+)"
 LONG_DESCRIPTION = """
-Orange3-Biblium (OrangeBib) provides widgets for bibliometric and scientometric 
+Orange3-Biblium (OrangeBib) provides widgets for bibliometric and scientometric
 analysis of academic literature. It integrates the Biblium library with Orange
 data mining suite.
 
@@ -30,11 +30,13 @@ Features:
 - Query OpenAlex API directly from Orange
 - Predefined sample datasets for learning and testing
 - Seamless integration with Orange's data analysis pipeline
+- Built-in widget help ("?" button) shipped with the add-on
 """
 
 AUTHOR = "Lan Umek"
-AUTHOR_EMAIL = ""
+AUTHOR_EMAIL = "lan.umek@fu.uni-lj.si"
 URL = "https://github.com/lan-umek/orange3-biblium"
+LICENSE = "MIT"
 
 KEYWORDS = [
     "orange3 add-on",
@@ -56,7 +58,7 @@ CLASSIFIERS = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering :: Information Analysis",
     "Topic :: Scientific/Engineering :: Visualization",
@@ -67,8 +69,17 @@ CLASSIFIERS = [
 PACKAGES = find_packages()
 
 PACKAGE_DATA = {
-    "orangebib": ["icons/*.svg"],
-    "orangebib.widgets": ["icons/*.svg"],
+    "orangebib": ["icons/*.svg", "data/*.xlsx", "data/*.csv", "data/*.txt"],
+    "orangebib.widgets": [
+        "icons/*.svg",
+        # Bundled HTML help for the in-app "?" button.
+        "help/*.html", "help/*.js", "help/*.inv",
+        "help/widgets/*.html",
+        "help/_static/*", "help/_static/css/*", "help/_static/js/*",
+        "help/_static/fonts/*", "help/_static/img/*",
+        "help/_images/*",
+        "help/_sources/*", "help/_sources/widgets/*",
+    ],
 }
 
 INSTALL_REQUIRES = [
@@ -76,11 +87,12 @@ INSTALL_REQUIRES = [
     "pandas>=1.5.0",
     "numpy>=1.21.0",
     "requests>=2.28.0",
+    "biblium>=2.16.0",  # Core analysis engine (required by most widgets)
 ]
 
 EXTRAS_REQUIRE = {
     "full": [
-        "biblium>=2.12.0",  # Full Biblium library
+        "biblium>=2.16.0",
     ],
 }
 
@@ -90,6 +102,11 @@ ENTRY_POINTS = {
     ],
     "orange3.addon": [
         "Biblium = orangebib",
+    ],
+    # In-app widget help ("?" button): intersphinx provider reads the bundled
+    # objects.inv and resolves each widget by its display name.
+    "orange.canvas.help": [
+        "intersphinx = orangebib.widgets:WIDGET_HELP_PATH",
     ],
 }
 
@@ -103,10 +120,12 @@ if __name__ == "__main__":
         author=AUTHOR,
         author_email=AUTHOR_EMAIL,
         url=URL,
+        license=LICENSE,
         keywords=KEYWORDS,
         classifiers=CLASSIFIERS,
         packages=PACKAGES,
         package_data=PACKAGE_DATA,
+        include_package_data=True,
         install_requires=INSTALL_REQUIRES,
         extras_require=EXTRAS_REQUIRE,
         entry_points=ENTRY_POINTS,

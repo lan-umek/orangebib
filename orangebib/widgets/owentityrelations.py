@@ -21,9 +21,8 @@ Selection model
 
 import logging
 import re
-from typing import Optional, List, Set, Tuple, Dict
+from typing import Optional, List, Set, Tuple
 from collections import Counter
-from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -34,15 +33,13 @@ from AnyQt.QtWidgets import (
     QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSizePolicy, QAbstractItemView, QTabWidget,
     QSplitter, QFrame, QLineEdit, QFileDialog, QApplication,
-    QToolButton, QToolTip, QTextEdit, QScrollArea,
+    QToolButton, QToolTip, QTextEdit,
 )
 from AnyQt.QtCore import Qt, QThread, pyqtSignal, QPoint
-from AnyQt.QtGui import QColor, QFont
 
 from Orange.data import (
     Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable,
 )
-from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.settings import Setting
 
@@ -59,7 +56,6 @@ except ImportError:
     sp_stats = None
 
 try:
-    from sklearn.feature_extraction.text import CountVectorizer
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -67,7 +63,6 @@ except ImportError:
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
     from matplotlib.figure import Figure
-    import matplotlib.colors as mcolors
     import matplotlib.patches as mpatches
     HAS_MPL = True
 except ImportError:
@@ -202,7 +197,7 @@ class OWEntityRelations(OWWidget):
         "With heatmap, CA biplot, balloon, network, and Sankey visualisations."
     )
     icon = "icons/entity_relations.svg"
-    priority = 36
+    priority = 490
     keywords = [
         "co-occurrence", "relationship", "entity", "matrix", "chi-square",
         "correspondence", "network", "heatmap", "sankey", "bipartite",
@@ -554,7 +549,7 @@ class OWEntityRelations(OWWidget):
 
             edit = getattr(self, f"{prefix}_{mode}_edit")
             edit.setPlainText("\n".join(lines))
-        except Exception as e:
+        except Exception:
             logger.exception("Load filter file")
 
     @staticmethod
@@ -874,9 +869,9 @@ class OWEntityRelations(OWWidget):
                 c_ents = [cv] if cv in col_set else []
 
             # Increment co-occurrences
-            for re in r_ents:
+            for r_ent in r_ents:
                 for ce in c_ents:
-                    mat[re][ce] += 1
+                    mat[r_ent][ce] += 1
 
         # Convert to DataFrame
         rows = []

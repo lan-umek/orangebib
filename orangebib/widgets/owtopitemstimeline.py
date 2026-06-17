@@ -9,7 +9,7 @@ Bubble size = document count, bubble color = citation metric.
 """
 
 import logging
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 from collections import Counter, defaultdict
 
 import numpy as np
@@ -44,6 +44,11 @@ ITEM_TYPES = [
     ("Countries", "Countries"),
     ("Affiliations", "Affiliations"),
     ("References", "References"),
+    ("OpenAlex Topics", "oa_topics"),
+    ("OpenAlex Fields", "oa_fields"),
+    ("OpenAlex Subfields", "oa_subfields"),
+    ("OpenAlex Concepts", "oa_concepts"),
+    ("OpenAlex SDGs", "oa_sdgs"),
 ]
 
 COLOR_BY_OPTIONS = [
@@ -99,6 +104,17 @@ class EntityAxisItem(AxisItem):
     def setEntityNames(self, names: List[str]):
         self.entity_names = names
     
+    def tickValues(self, minVal, maxVal, size):
+        # One tick per entity index -> removes the spurious minor ticks.
+        if not self.entity_names:
+            return []
+        a, b = (minVal, maxVal) if minVal <= maxVal else (maxVal, minVal)
+        lo = max(0, int(np.floor(a)))
+        hi = min(len(self.entity_names) - 1, int(np.ceil(b)))
+        if hi < lo:
+            return []
+        return [(1.0, [float(i) for i in range(lo, hi + 1)])]
+
     def tickStrings(self, values, scale, spacing):
         strings = []
         for v in values:
@@ -141,7 +157,7 @@ class TopItemsPlotGraph(PlotWidget):
         
         self.getPlotItem().buttonsHidden = True
         self.getPlotItem().setContentsMargins(10, 10, 10, 10)
-        self.showGrid(x=False, y=False, alpha=0.3)
+        self.showGrid(x=False, y=True, alpha=0.25)
         
         # Color bar for legend
         self.color_bar = None
@@ -160,7 +176,8 @@ class TopItemsPlotGraph(PlotWidget):
         self.setTitle("")
     
     def set_grid(self, show: bool):
-        self.showGrid(x=show, y=show, alpha=0.3)
+        # Horizontal reference lines (aligned with entities); user-removable.
+        self.showGrid(x=False, y=show, alpha=0.25)
     
     def plot_timeline(self, data: List[Dict], entity_names: List[str],
                       color_map_name: str, color_label: str,
@@ -213,27 +230,28 @@ class TopItemsPlotGraph(PlotWidget):
             size=size_normalized,
             brush=brushes,
             pen=pg.mkPen(QColor(50, 50, 50, 100), width=0.5),
-            hoverable=True,
+            hoverable=False,   # disable pyqtgraph's built-in coord tooltip
+            tip=None,          # (we provide our own tooltip via _on_mouse_moved)
         )
         self.addItem(self.scatter_item)
         
-        # Set axis labels
-        self.setLabel('bottom', 'Year')
-        
-        if title:
-            self.setTitle(title)
-        
+        # Set axis labels (user-overridable)
+        self.setLabel('bottom', getattr(self, "_x_label", None) or 'Year')
+        if getattr(self, "_y_label", None):
+            self.setLabel('left', self._y_label)
+        # plain title (no in-plot legend — it overlapped the points)
+        self.setTitle(title or "Top items over time")
+
+        # Force the entity-name axis to repaint so labels are not lost.
+        self.entity_axis.setEntityNames(entity_names)
+        self.entity_axis.picture = None
+        self.entity_axis.update()
+
         # Set view range
-        x_margin = (x.max() - x.min()) * 0.05 if x.max() > x.min() else 5
-        self.setXRange(x.min() - x_margin, x.max() + x_margin)
+        x_span = (x.max() - x.min()) if x.max() > x.min() else 10
+        self.setXRange(x.min() - x_span * 0.05, x.max() + x_span * 0.05)
         self.setYRange(-0.5, len(entity_names) - 0.5)
-        
-        # Add color bar legend
-        self._add_color_legend(cmap, color_values.min(), color_values.max(), color_label)
-        
-        # Add size legend
-        if show_size_legend:
-            self._add_size_legend(sizes.min(), sizes.max())
+        self.getViewBox().invertY(True)  # rank 1 (top item) at the top
     
     def _add_color_legend(self, cmap: ColorMap, vmin: float, vmax: float, label: str):
         """Add color bar legend."""
@@ -354,7 +372,7 @@ class OWTopItemsTimeline(OWWidget):
     name = "Top Items Timeline"
     description = "Bubble plot showing entity production over time"
     icon = "icons/top_items_timeline.svg"
-    priority = 80
+    priority = 220
     keywords = ["timeline", "bubble", "author", "keyword", "temporal"]
     category = "Biblium"
     
@@ -373,7 +391,10 @@ class OWTopItemsTimeline(OWWidget):
     min_docs = settings.Setting(1)
     color_by_index = settings.Setting(0)
     color_map_index = settings.Setting(0)
-    show_grid = settings.Setting(False)
+    show_grid = settings.Setting(True)
+    plot_title = settings.Setting("Top Items Timeline")
+    x_axis_label = settings.Setting("Year")
+    y_axis_label = settings.Setting("")
     
     auto_commit = settings.Setting(True)
     
@@ -450,6 +471,12 @@ class OWTopItemsTimeline(OWWidget):
         
         gui.checkBox(opt_box, self, "show_grid", "Show grid",
                      callback=self._update_grid)
+        gui.lineEdit(opt_box, self, "plot_title", label="Title:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
+        gui.lineEdit(opt_box, self, "x_axis_label", label="X label:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
+        gui.lineEdit(opt_box, self, "y_axis_label", label="Y label:",
+                     orientation=Qt.Horizontal, callback=self._on_setting_changed)
         
         # Generate button
         self.generate_btn = gui.button(
@@ -467,18 +494,28 @@ class OWTopItemsTimeline(OWWidget):
         self.mainArea.layout().addWidget(self.graph)
     
     def _on_item_type_changed(self):
-        # Update column selection based on item type
+        # Update column selection based on item type, then refresh the plot.
         item_name, col_name = ITEM_TYPES[self.item_type_index]
         if col_name in self._columns:
             idx = self._columns.index(col_name)
             self.col_combo.setCurrentIndex(idx)
             self.column_name = col_name
-    
+        else:
+            self._suggest_column()
+        self._refresh()
+
     def _on_column_changed(self):
-        pass
-    
+        if self._columns:
+            self.column_name = self.col_combo.currentText()
+        self._refresh()
+
     def _on_setting_changed(self):
-        pass
+        self._refresh()
+
+    def _refresh(self):
+        """Re-run the analysis if data is loaded (keeps the view in sync)."""
+        if getattr(self, "_df", None) is not None:
+            self._run_analysis()
     
     def _update_grid(self):
         self.graph.set_grid(self.show_grid)
@@ -521,30 +558,43 @@ class OWTopItemsTimeline(OWWidget):
             data[var.name] = table.get_column(var)
         return pd.DataFrame(data)
     
+    # patterns specific to each item type (avoids e.g. picking a Source column
+    # for Countries — which showed "Scopus")
+    _TYPE_PATTERNS = {
+        "Authors": ["authors", "author full names", "author"],
+        "Author Keywords": ["author keywords", "author keyword", "de"],
+        "Index Keywords": ["index keywords", "keywords plus", "id"],
+        "Sources": ["source title", "source", "journal", "publication name"],
+        "Countries": ["countries of authors", "country", "countries",
+                      "oa_institution_countries"],
+        "Affiliations": ["affiliation", "affiliations", "c1"],
+        "References": ["references", "cited references", "cr"],
+    }
+
     def _suggest_column(self):
-        """Suggest column based on item type."""
+        """Suggest a column based ONLY on the selected item type."""
         if not self._columns:
             return
-        
         item_name, default_col = ITEM_TYPES[self.item_type_index]
-        
-        # Try exact match first
+        # Try the exact configured column first
         if default_col in self._columns:
-            idx = self._columns.index(default_col)
-            self.col_combo.setCurrentIndex(idx)
-            self.column_name = default_col
+            self._set_column(default_col)
             return
-        
-        # Try pattern matching
-        patterns = ["author", "keyword", "source", "affiliation", "country"]
-        for col in self._columns:
-            col_lower = col.lower()
-            for pattern in patterns:
-                if pattern in col_lower:
-                    idx = self._columns.index(col)
-                    self.col_combo.setCurrentIndex(idx)
-                    self.column_name = col
-                    return
+        cols_lower = {c.lower(): c for c in self._columns}
+        # type-specific candidate names / substrings only
+        for cand in self._TYPE_PATTERNS.get(item_name, [default_col.lower()]):
+            if cand in cols_lower:
+                self._set_column(cols_lower[cand]); return
+        for cand in self._TYPE_PATTERNS.get(item_name, [default_col.lower()]):
+            for cl, orig in cols_lower.items():
+                if cand in cl:
+                    self._set_column(orig); return
+        # no confident match -> leave current selection untouched
+
+    def _set_column(self, col):
+        if col in self._columns:
+            self.col_combo.setCurrentIndex(self._columns.index(col))
+            self.column_name = col
     
     def _get_year_column(self) -> Optional[str]:
         for col in self._columns:
@@ -613,13 +663,14 @@ class OWTopItemsTimeline(OWWidget):
             
             val_str = str(val)
             
-            # Split by separators
-            for sep in [";", "|"]:
+            # Split by separators (incl. comma for country lists)
+            for sep in ["||", "|", "; ", ";", ", "]:
                 if sep in val_str:
                     entities = [e.strip() for e in val_str.split(sep) if e.strip()]
                     break
             else:
                 entities = [val_str.strip()] if val_str.strip() else []
+            entities = list(dict.fromkeys(entities))
             
             for entity in entities:
                 entity_year_data[entity][year]["docs"] += 1
@@ -680,12 +731,14 @@ class OWTopItemsTimeline(OWWidget):
         color_map_name = list(COLOR_MAPS.keys())[self.color_map_index]
         color_label = COLOR_BY_OPTIONS[self.color_by_index][0]
         
+        self.graph._x_label = self.x_axis_label
+        self.graph._y_label = self.y_axis_label
         self.graph.plot_timeline(
             data=timeline_data,
             entity_names=entity_names,
             color_map_name=color_map_name,
             color_label=color_label,
-            title="Top Items Timeline",
+            title=self.plot_title or "Top Items Timeline",
             show_size_legend=True,
         )
         

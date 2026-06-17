@@ -17,12 +17,11 @@ import pandas as pd
 from scipy import stats
 
 from AnyQt.QtCore import Qt
-from AnyQt.QtGui import QColor
 from AnyQt.QtWidgets import QSplitter, QTabWidget, QTextEdit
 
 import pyqtgraph as pg
 
-from Orange.data import Table, Domain, ContinuousVariable, StringVariable
+from Orange.data import Table
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.visualize.utils.plotutils import AxisItem, PlotWidget
@@ -433,7 +432,7 @@ class OWBibliometricLaws(OWWidget):
     name = "Bibliometric Laws"
     description = "Analyze Lotka, Bradford, Zipf, Price, and Pareto bibliometric laws"
     icon = "icons/bibliometric_laws.svg"
-    priority = 70
+    priority = 140
     keywords = ["lotka", "bradford", "zipf", "price", "pareto", "law"]
     category = "Biblium"
     

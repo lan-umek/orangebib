@@ -11,21 +11,17 @@ Supports:
 - All: Combined view
 """
 
-import os
 import logging
-from typing import Optional, List, Any
-from collections import Counter
+from typing import Optional, List
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy,
+    QHBoxLayout, QGridLayout, QLabel, QComboBox,
+    QPushButton, QSpinBox, QCheckBox, QTableWidget,
+    QTableWidgetItem,
 )
-from AnyQt.QtCore import Qt
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
 from Orange.widgets import gui, settings
@@ -34,7 +30,6 @@ from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 # Try to import biblium
 try:
-    import biblium
     from biblium import utilsbib
     HAS_BIBLIUM = True
 except ImportError:
@@ -68,7 +63,7 @@ class OWTopCited(OWWidget):
     name = "Top Cited"
     description = "Global and local top-cited documents"
     icon = "icons/top_cited.svg"
-    priority = 40
+    priority = 160
     keywords = ["citations", "top", "cited", "ranking", "impact"]
     category = "Biblium"
     
@@ -600,7 +595,7 @@ class OWTopCited(OWWidget):
         # Find citation columns for summary
         global_col = "Global Citations" if "Global Citations" in df.columns else None
         local_col = "Local Citations" if "Local Citations" in df.columns else None
-        per_year_col = "Citations per Year" if "Citations per Year" in df.columns else None
+        "Citations per Year" if "Citations per Year" in df.columns else None
         
         summary_parts = [
             f"<b>Analysis:</b> {self.analysis_type}",

@@ -290,7 +290,7 @@ class OWEntityOverTime(OWWidget):
     name = "Entity Over Time"
     description = "Analyze production over time of authors, keywords, sources"
     icon = "icons/entity_time.svg"
-    priority = 75
+    priority = 230
     keywords = ["temporal", "trend", "time", "entity", "keyword", "author"]
     category = "Biblium"
     
@@ -306,6 +306,8 @@ class OWEntityOverTime(OWWidget):
     column_name = settings.Setting("")
     top_n = settings.Setting(10)
     min_docs = settings.Setting(1)
+    year_from = settings.Setting(0)
+    year_to = settings.Setting(0)
     plot_type_index = settings.Setting(0)
     color_map_index = settings.Setting(0)
     show_legend = settings.Setting(True)
@@ -357,6 +359,10 @@ class OWEntityOverTime(OWWidget):
         
         gui.spin(settings_box, self, "min_docs", minv=1, maxv=1000,
                  label="Min Documents:", callback=self._on_setting_changed)
+        gui.spin(settings_box, self, "year_from", minv=0, maxv=2100,
+                 label="Year from (0=auto):", callback=self._on_setting_changed)
+        gui.spin(settings_box, self, "year_to", minv=0, maxv=2100,
+                 label="Year to (0=auto):", callback=self._on_setting_changed)
         
         # Plot Type
         plot_box = gui.widgetBox(self.controlArea, "Plot Type")
@@ -435,9 +441,17 @@ class OWEntityOverTime(OWWidget):
         
         self._df = self._table_to_df(data)
         self._columns = list(self._df.columns)
-        
-        self.col_combo.addItems(self._columns)
-        self._suggest_column()
+
+        # Only offer entity-type columns (keywords, authors, sources,
+        # countries, OpenAlex topics/fields ...), not Year/DOI/Abstract.
+        ent = self._entity_columns()
+        items = ent if ent else self._columns
+        self.col_combo.addItems(items)
+        default = items[0] if items else ""
+        if self.column_name in items:
+            default = self.column_name
+        self.col_combo.setCurrentText(default)
+        self.column_name = default
     
     def _table_to_df(self, table: Table) -> pd.DataFrame:
         data = {}
@@ -449,25 +463,45 @@ class OWEntityOverTime(OWWidget):
             data[var.name] = table.get_column(var)
         return pd.DataFrame(data)
     
+    ENTITY_PATTERNS = (
+        "keyword", "author", "source", "journal", "countr", "affiliation",
+        "document type", "doctype", "subject", "research area",
+        "institution", "topic", "concept", "sdg", "domain", "field",
+    )
+
+    def _entity_columns(self):
+        """Return columns that represent countable entities (multi-valued
+        bibliometric fields), excluding Year/DOI/Abstract-type columns."""
+        if self._df is None:
+            return []
+        skip = ("year", "doi", "abstract", "title", "id", "url", "issn",
+                "page", "volume", "issue", "date", "index")
+        out = []
+        for col in self._df.columns:
+            cl = str(col).lower()
+            if any(s == cl or cl.startswith(s) for s in ("year", "doi")):
+                continue
+            if any(k in cl for k in self.ENTITY_PATTERNS) and \
+               not any(cl == s for s in skip):
+                out.append(col)
+        # de-duplicate preserving order
+        seen, res = set(), []
+        for c in out:
+            if c not in seen:
+                seen.add(c)
+                res.append(c)
+        return res
+
     def _suggest_column(self):
-        """Suggest appropriate column."""
-        if not self._columns:
-            return
-        
-        patterns = ["keyword", "author", "source", "affiliation", "country"]
-        
-        for col in self._columns:
-            col_lower = col.lower()
-            for pattern in patterns:
-                if pattern in col_lower:
-                    idx = self._columns.index(col)
-                    self.col_combo.setCurrentIndex(idx)
-                    self.column_name = col
-                    return
+        ent = self._entity_columns()
+        if ent:
+            self.column_name = ent[0]
     
     def _get_year_column(self) -> Optional[str]:
+        candidates = ["year", "publication year", "pub year", "pubyear",
+                      "py", "oa_publication_year", "publication_year"]
         for col in self._columns:
-            if col.lower() in ["year", "publication year", "pub year", "pubyear"]:
+            if col.lower() in candidates:
                 return col
         return None
     
@@ -502,7 +536,16 @@ class OWEntityOverTime(OWWidget):
         df[year_col] = pd.to_numeric(df[year_col], errors='coerce')
         df = df.dropna(subset=[year_col])
         df[year_col] = df[year_col].astype(int)
-        
+
+        # Optional user-defined period
+        if self.year_from and self.year_from > 0:
+            df = df[df[year_col] >= self.year_from]
+        if self.year_to and self.year_to > 0:
+            df = df[df[year_col] <= self.year_to]
+        if df.empty:
+            self.Error.insufficient_data()
+            return
+
         # Get entity counts per year
         entity_year_counts = defaultdict(lambda: defaultdict(int))
         entity_total_counts = Counter()
@@ -517,8 +560,8 @@ class OWEntityOverTime(OWWidget):
             
             val_str = str(val)
             
-            # Split by separators
-            for sep in [";", "|"]:
+            # Split by the column's separator (space-variants first).
+            for sep in ["||", "|", "; ", ";", ", "]:
                 if sep in val_str:
                     entities = [e.strip() for e in val_str.split(sep) if e.strip()]
                     break
@@ -594,7 +637,7 @@ class OWEntityOverTime(OWWidget):
         colors = COLOR_MAPS[color_map_name]
         
         y_label = "Cumulative Documents" if plot_type == "cumulative" else "Documents"
-        title = f"Entity Production Per Year"
+        title = "Entity Production Per Year"
         
         self.graph.plot_entities(
             data=entity_data,

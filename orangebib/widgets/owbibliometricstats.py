@@ -16,30 +16,25 @@ Geographic filtering supports EU, continent names, and country codes/names.
 import os
 import re
 import logging
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Set
 from collections import Counter
-from itertools import chain
 
 import numpy as np
 import pandas as pd
 
 from AnyQt.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QPlainTextEdit, QLineEdit,
-    QFileDialog, QFrame,
+    QHBoxLayout, QGridLayout, QLabel, QComboBox,
+    QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QPlainTextEdit, QLineEdit, QFileDialog,
 )
-from AnyQt.QtCore import Qt
 
-from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
+from Orange.data import Table, Domain, ContinuousVariable, StringVariable
 from Orange.widgets import gui, settings
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.utils.widgetpreview import WidgetPreview
 
 # Try to import biblium
 try:
-    import biblium
     from biblium import utilsbib
     HAS_BIBLIUM = True
 except ImportError:
@@ -100,9 +95,40 @@ ENTITY_TYPES = {
         "label": "Document Type",
     },
     "Subject Fields": {
-        "columns": ["Subject Area", "Field", "Research Areas", "WC", "SC"],
+        "columns": ["Subject Area", "Field", "Research Areas", "WC", "SC",
+                    "oa_fields", "oa_field"],
         "value_type": "list",
         "label": "Field",
+    },
+    "OpenAlex Fields": {
+        "columns": ["oa_fields", "oa_field"],
+        "value_type": "list",
+        "label": "Field",
+    },
+    "OpenAlex Subfields": {
+        "columns": ["oa_subfields", "oa_subfield"],
+        "value_type": "list",
+        "label": "Subfield",
+    },
+    "OpenAlex Domains": {
+        "columns": ["oa_domains", "oa_domain"],
+        "value_type": "list",
+        "label": "Domain",
+    },
+    "OpenAlex Topics": {
+        "columns": ["oa_topics", "oa_primary_topic"],
+        "value_type": "list",
+        "label": "Topic",
+    },
+    "OpenAlex Concepts": {
+        "columns": ["oa_concepts"],
+        "value_type": "list",
+        "label": "Concept",
+    },
+    "OpenAlex SDGs": {
+        "columns": ["oa_sdgs"],
+        "value_type": "list",
+        "label": "SDG",
     },
 }
 
@@ -172,6 +198,136 @@ def average_citations(citations):
     return np.mean(valid) if valid else 0
 
 
+# ---------------------------------------------------------------------------
+# Additional h-index variants (SCI2S "h-index and Variants" reference).
+# All operate on a list of per-paper citation counts; time-based ones also
+# take the publication years.
+# ---------------------------------------------------------------------------
+
+def _clean_cites(citations):
+    return sorted([int(c) for c in citations if pd.notna(c)], reverse=True)
+
+
+def a_index(citations):
+    """Mean number of citations of the papers in the Hirsch core."""
+    s = _clean_cites(citations)
+    h = h_index(citations)
+    if h <= 0:
+        return 0.0
+    core = s[:h]
+    return float(np.mean(core)) if core else 0.0
+
+
+def m_index(citations):
+    """Median number of citations of the Hirsch-core papers (Bornmann)."""
+    s = _clean_cites(citations)
+    h = h_index(citations)
+    if h <= 0:
+        return 0.0
+    core = s[:h]
+    return float(np.median(core)) if core else 0.0
+
+
+def r_index(citations):
+    """Square root of the citations in the Hirsch core (Jin et al.)."""
+    s = _clean_cites(citations)
+    h = h_index(citations)
+    if h <= 0:
+        return 0.0
+    return float(np.sqrt(sum(s[:h])))
+
+
+def e_index(citations):
+    """Excess citations in the Hirsch core: e = sqrt(sum(c_i - h)) (Zhang)."""
+    s = _clean_cites(citations)
+    h = h_index(citations)
+    if h <= 0:
+        return 0.0
+    excess = sum(c - h for c in s[:h])
+    return float(np.sqrt(excess)) if excess > 0 else 0.0
+
+
+def q2_index(citations):
+    """Geometric mean of h-index and the m-index (Cabrerizo et al.)."""
+    h = h_index(citations)
+    m = m_index(citations)
+    return float(np.sqrt(h * m)) if h and m else 0.0
+
+
+def v_index(citations, n_papers=None):
+    """Percentage of papers that form the h-index: 100 * h / Np (Riikonen)."""
+    h = h_index(citations)
+    n = n_papers if n_papers else len([c for c in citations if pd.notna(c)])
+    return float(100.0 * h / n) if n else 0.0
+
+
+def pi_index(citations, n_papers=None):
+    """Vinkler pi-index: 1/100 of citations of the top sqrt(Np) 'elite' papers."""
+    s = _clean_cites(citations)
+    n = n_papers if n_papers else len(s)
+    if n <= 0:
+        return 0.0
+    elite = int(np.floor(np.sqrt(n)))
+    if elite <= 0:
+        return 0.0
+    return float(sum(s[:elite]) / 100.0)
+
+
+def p_index(citations, n_papers=None):
+    """Prathap performance p-index: (C^2 / Np)^(1/3)."""
+    s = _clean_cites(citations)
+    n = n_papers if n_papers else len(s)
+    c = sum(s)
+    if n <= 0 or c <= 0:
+        return 0.0
+    return float((c * c / n) ** (1.0 / 3.0))
+
+
+def rational_h_index(citations):
+    """Ruane & Tol rational h-index: h + 1 - n_c/(2h+1), where n_c is the number
+    of citations still needed to reach h+1. Lies in [h, h+1]."""
+    s = _clean_cites(citations)
+    h = h_index(citations)
+    if not s:
+        return 0.0
+    # citations needed so that the top (h+1) papers each reach h+1
+    needed = 0
+    for i in range(h + 1):
+        c = s[i] if i < len(s) else 0
+        needed += max(0, (h + 1) - c)
+    denom = (2 * h + 1) if h >= 0 else 1
+    return float(h + 1 - needed / denom)
+
+
+def m_quotient(citations, years):
+    """Hirsch m-quotient: h divided by the scientific age (years since the first
+    publication). Needs the publication years of the papers."""
+    h = h_index(citations)
+    yy = [int(y) for y in years if pd.notna(y) and 1500 < int(y) < 2100]
+    if h <= 0 or not yy:
+        return 0.0
+    age = (max(yy) - min(yy)) + 1
+    return float(h / age) if age > 0 else 0.0
+
+
+def tapered_h_index(citations):
+    """Anderson-Hankin-Killworth tapered h-index. Paper ranked j with c
+    citations: its t-th citation scores 1/(2j-1) for t<=j and 1/(2t-1) for t>j."""
+    s = _clean_cites(citations)
+    if not s:
+        return 0.0
+    total = 0.0
+    for j, c in enumerate(s, 1):
+        if c <= 0:
+            continue
+        head = min(c, j) / (2 * j - 1)
+        total += head
+        if c > j:
+            t = np.arange(j + 1, c + 1, dtype=float)
+            total += float(np.sum(1.0 / (2.0 * t - 1.0)))
+    return float(total)
+
+
 # =============================================================================
 # MAIN WIDGET
 # =============================================================================
@@ -182,7 +338,7 @@ class OWBibliometricStats(OWWidget):
     name = "Bibliometric Statistics"
     description = "Compute performance indicators (H-index, G-index, etc.) for bibliometric entities"
     icon = "icons/bibliometric_stats.svg"
-    priority = 30
+    priority = 120
     keywords = ["h-index", "g-index", "citations", "performance", "bibliometric", "statistics"]
     category = "Biblium"
     
@@ -224,6 +380,8 @@ class OWBibliometricStats(OWWidget):
     
     class Warning(OWWidget.Warning):
         empty_result = Msg("No entities found matching criteria")
+        empty_column = Msg("Column '{}' has no values to count. For countries, "
+                           "enrich with OpenAlex / run the Geographic widget first.")
         no_biblium = Msg("Biblium not installed - using basic implementation")
         geo_filter_applied = Msg("Geographic filter: {} documents from {} total")
     
@@ -548,13 +706,44 @@ class OWBibliometricStats(OWWidget):
         
         # Convert to DataFrame
         self._df = self._table_to_df(data)
-        
+        self._refresh_entity_choices()
+
         # Update summary
         self.summary_label.setText(f"Loaded {len(self._df):,} documents")
         
         if self.auto_apply:
             self.commit()
     
+    def _refresh_entity_choices(self):
+        """Show only entity types that have a matching column in the data
+        (so OpenAlex options appear only when the data is enriched)."""
+        if self._df is None:
+            return
+        def _has(name, cfg):
+            if name == "All Keywords":
+                # Built on the fly from author + index keywords (union), or any
+                # available keyword-like column.
+                if (self._find_column(self._df, ENTITY_TYPES["Author Keywords"]["columns"])
+                        or self._find_column(self._df, ENTITY_TYPES["Index Keywords"]["columns"])):
+                    return True
+                return any("keyword" in str(c).lower() for c in self._df.columns)
+            return bool(self._find_column(self._df, cfg.get("columns", [])))
+        avail = [name for name, cfg in ENTITY_TYPES.items() if _has(name, cfg)]
+        if not avail:
+            avail = list(ENTITY_TYPES.keys())
+        self.entity_combo.blockSignals(True)
+        current = self.entity_combo.currentText()
+        self.entity_combo.clear()
+        self.entity_combo.addItems(avail)
+        if current in avail:
+            self.entity_combo.setCurrentText(current)
+        elif self.entity_type in avail:
+            self.entity_combo.setCurrentText(self.entity_type)
+        else:
+            self.entity_type = avail[0]
+            self.entity_combo.setCurrentText(avail[0])
+        self.entity_combo.blockSignals(False)
+
     def _table_to_df(self, table: Table) -> pd.DataFrame:
         """Convert Orange Table to pandas DataFrame."""
         data = {}
@@ -742,7 +931,10 @@ class OWBibliometricStats(OWWidget):
             
             # Find entity column
             entity_config = ENTITY_TYPES.get(self.entity_type, {})
-            entity_col = self._find_column(work_df, entity_config.get("columns", []))
+            if self.entity_type == "All Keywords":
+                entity_col = self._ensure_all_keywords(work_df)
+            else:
+                entity_col = self._find_column(work_df, entity_config.get("columns", []))
             
             if entity_col is None:
                 self.Error.no_column(", ".join(entity_config.get("columns", [])[:3]))
@@ -768,7 +960,18 @@ class OWBibliometricStats(OWWidget):
             # Get entity label and value type
             entity_label = entity_config.get("label", "Item")
             value_type = entity_config.get("value_type", "list")
-            
+
+            # Normalise list-valued columns to a clean "; " separator so the
+            # downstream counting always splits items correctly (handles data
+            # that uses ";", "/", space-separated author names, etc.).
+            if value_type == "list":
+                is_author = ("author" in entity_col.lower()
+                             or self.entity_type == "Authors")
+                work_df = work_df.copy()
+                work_df[entity_col] = work_df[entity_col].apply(
+                    lambda v: "; ".join(self._split_list_value(v, is_author))
+                    if pd.notna(v) else v)
+
             # Use biblium if available
             if HAS_BIBLIUM and utilsbib:
                 stats_df = self._compute_with_biblium(
@@ -779,6 +982,8 @@ class OWBibliometricStats(OWWidget):
                     work_df, entity_col, entity_label, value_type, cite_col, mode
                 )
             
+            stats_df = self._drop_invalid_entities(stats_df)
+
             if stats_df is None or stats_df.empty:
                 self.Warning.empty_result()
                 self._stats_df = None
@@ -811,6 +1016,52 @@ class OWBibliometricStats(OWWidget):
             self.Outputs.stats.send(None)
             self.Outputs.selected_data.send(None)
     
+    def _ensure_all_keywords(self, work_df: pd.DataFrame):
+        """Return a combined keyword column, building one from Author + Index
+        keywords when the dataset has no ready-made 'All Keywords' column."""
+        for c in ["All Keywords", "Keywords", "Processed Keywords"]:
+            if c in work_df.columns:
+                return c
+        ak = self._find_column(work_df, ["Author Keywords", "Author keywords", "DE"])
+        ik = self._find_column(work_df, ["Index Keywords", "Index keywords", "ID"])
+        cols = [c for c in (ak, ik) if c]
+        if not cols:
+            return None
+
+        def _combine(row):
+            items = []
+            for c in cols:
+                v = row.get(c)
+                if v is None or (isinstance(v, float) and pd.isna(v)):
+                    continue
+                text = str(v)
+                sep = next((x for x in ["||", "|", "; ", ";", ", "] if x in text), "; ")
+                for part in text.split(sep):
+                    part = part.strip()
+                    if part and part.lower() not in ("nan", "none"):
+                        items.append(part)
+            seen, out = set(), []
+            for it in items:
+                k = it.lower()
+                if k not in seen:
+                    seen.add(k)
+                    out.append(it)
+            return "; ".join(out)
+
+        work_df["All Keywords"] = work_df.apply(_combine, axis=1)
+        return "All Keywords"
+
+    @staticmethod
+    def _drop_invalid_entities(stats_df):
+        """Remove placeholder rows like 'undefined', 'nan', empty, etc."""
+        if stats_df is None or len(stats_df) == 0:
+            return stats_df
+        col = stats_df.columns[0]
+        bad = {"undefined", "nan", "none", "", "null", "n/a"}
+        keep = stats_df[col].astype(str).str.strip().apply(
+            lambda v: v.lower() not in bad and not v.lower().startswith("undefined"))
+        return stats_df[keep].reset_index(drop=True)
+
     def _build_entity_doc_indices(self, work_df: pd.DataFrame, entity_col: str, 
                                    value_type: str, stats_df: pd.DataFrame,
                                    original_indices: List[int]):
@@ -825,14 +1076,8 @@ class OWBibliometricStats(OWWidget):
         stats_entity_col = stats_df.columns[0]
         stats_entities = set(str(e) for e in stats_df[stats_entity_col].dropna())
         
-        # Determine separator
-        sep = "; "
-        if len(work_df) > 0:
-            sample = work_df[entity_col].dropna()
-            if len(sample) > 0:
-                sample_str = str(sample.iloc[0])
-                if "|" in sample_str:
-                    sep = "|"
+        # Determine separator (robust)
+        sep = self._detect_separator(work_df[entity_col]) if value_type != "string" else "; "
         
         # Build mapping - work_df position i corresponds to original_indices[i]
         for work_idx in range(len(work_df)):
@@ -855,6 +1100,43 @@ class OWBibliometricStats(OWWidget):
                         self._entity_doc_indices[entity] = []
                     self._entity_doc_indices[entity].append(original_idx)
     
+    @staticmethod
+    def _split_list_value(value, is_author=False):
+        """Split one cell of a list-valued column into individual items.
+
+        Handles the usual explicit delimiters (||, |, ';', newline, '/') and,
+        for author columns that lack any delimiter, the space-separated
+        "Surname, Given" pattern (e.g. "Frommholz, Ingo Mayr, Philipp" ->
+        ["Frommholz, Ingo", "Mayr, Philipp"]).
+        """
+        s = str(value).strip()
+        if not s or s.lower() == "nan":
+            return []
+        for d in ["||", "|", "; ", ";", "\n", "\t", " / ", "/"]:
+            if d in s:
+                return [x.strip() for x in s.split(d) if x.strip()]
+        if is_author and "," in s:
+            parts = re.split(r"(?<=\S)\s+(?=[A-Z\u00C0-\u024F][\w'.\-]*,)", s)
+            parts = [x.strip() for x in parts if x.strip()]
+            return parts if len(parts) > 1 else [s]
+        if not is_author and ", " in s:
+            return [x.strip() for x in s.split(", ") if x.strip()]
+        return [s]
+
+    @staticmethod
+    def _detect_separator(series, default="; "):
+        """Pick the list separator actually used in a (possibly list-valued)
+        text column. Tries multi-char separators first so we never mistake the
+        ", " inside "Surname, Given" author names for a separator."""
+        try:
+            sample = "\n".join(series.dropna().astype(str).head(200).tolist())
+        except Exception:
+            return default
+        for cand in ["||", " | ", "|", " ; ", "; ", ";", " / ", "/"]:
+            if cand in sample:
+                return cand
+        return default
+
     def _find_column(self, df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
         """Find first available column from candidates."""
         for col in candidates:
@@ -879,10 +1161,8 @@ class OWBibliometricStats(OWWidget):
         items_of_interest = self._get_items_of_interest()
         exclude_items = self._get_exclude_items()
         
-        # Determine separator
-        sep = "; "
-        if len(df) > 0 and "|" in str(df[entity_col].iloc[0]):
-            sep = "|"
+        # Determine separator (robust)
+        sep = self._detect_separator(df[entity_col]) if value_type != "string" else "; "
         
         regex_inc = self.regex_include.strip() or None
         regex_exc = self.regex_exclude.strip() or None
@@ -897,6 +1177,10 @@ class OWBibliometricStats(OWWidget):
             sep=sep,
         )
         
+        if counts_df is None or counts_df.empty:
+            self.Warning.empty_column(entity_col)
+            return None
+
         # Use biblium's get_entity_stats
         stats_df, _ = utilsbib.get_entity_stats(
             df=df,
@@ -923,12 +1207,8 @@ class OWBibliometricStats(OWWidget):
         # Ensure citations are numeric
         df[cite_col] = pd.to_numeric(df[cite_col], errors='coerce').fillna(0)
         
-        # Determine separator
-        sep = "; "
-        if len(df) > 0:
-            sample = df[entity_col].dropna()
-            if len(sample) > 0 and "|" in str(sample.iloc[0]):
-                sep = "|"
+        # Determine separator (robust)
+        sep = self._detect_separator(df[entity_col]) if value_type != "string" else "; "
         
         items_of_interest = self._get_items_of_interest()
         exclude_items = self._get_exclude_items()
@@ -992,7 +1272,19 @@ class OWBibliometricStats(OWWidget):
                 stats["W-index"] = w_index(citations)
                 stats["HG-index"] = hg_index(citations)
                 stats["Average citations"] = average_citations(citations)
-            
+                # Additional h-index variants (SCI2S reference)
+                stats["A-index"] = round(a_index(citations), 3)
+                stats["M-index (median)"] = round(m_index(citations), 3)
+                stats["R-index"] = round(r_index(citations), 3)
+                stats["E-index"] = round(e_index(citations), 3)
+                stats["Q2-index"] = round(q2_index(citations), 3)
+                stats["V-index (%)"] = round(v_index(citations, doc_count), 2)
+                stats["Pi-index"] = round(pi_index(citations, doc_count), 3)
+                stats["P-index"] = round(p_index(citations, doc_count), 3)
+                stats["Rational H-index"] = round(rational_h_index(citations), 3)
+                stats["Tapered H-index"] = round(tapered_h_index(citations), 3)
+                stats["M-quotient"] = round(m_quotient(citations, years), 4)
+
             stats_list.append(stats)
         
         return pd.DataFrame(stats_list) if stats_list else None

@@ -18,7 +18,7 @@ Outputs:
 """
 
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List
 from collections import Counter
 
 import numpy as np
@@ -27,16 +27,14 @@ import pandas as pd
 from AnyQt.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QPushButton, QSpinBox,
-    QGroupBox, QCheckBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QSizePolicy, QRadioButton, QButtonGroup,
-    QAbstractItemView, QTabWidget, QSplitter, QFrame,
+    QCheckBox, QTableWidget, QTableWidgetItem, QRadioButton,
+    QButtonGroup, QAbstractItemView, QTabWidget, QFrame,
     QLineEdit, QFileDialog, QApplication,
 )
 from AnyQt.QtCore import Qt, QThread, pyqtSignal
-from AnyQt.QtGui import QColor, QFont
 
 from Orange.data import Table, Domain, ContinuousVariable, DiscreteVariable, StringVariable
-from Orange.widgets import gui, settings
+from Orange.widgets import gui
 from Orange.widgets.widget import OWWidget, Input, Output, Msg
 from Orange.widgets.settings import Setting
 
@@ -46,7 +44,6 @@ logger = logging.getLogger(__name__)
 # Biblium imports
 # ---------------------------------------------------------------------------
 try:
-    import biblium
     from biblium import utilsbib
     from biblium.bibstats import BiblioStats
     HAS_BIBLIUM = True
@@ -209,7 +206,7 @@ class OWGroupStatistics(OWWidget):
                     "percentile ranks) for bibliometric entities across "
                     "document groups")
     icon = "icons/group_statistics.svg"
-    priority = 33
+    priority = 620
     keywords = ["group", "statistics", "performance", "indicators",
                 "comparison", "entity", "counts", "ranks", "percentile"]
     category = "Biblium"
@@ -838,14 +835,15 @@ class OWGroupStatistics(OWWidget):
             exploded = exploded[exploded.str.lower() != "nan"]
             if exploded.empty:
                 return pd.DataFrame(columns=[entity_label, "Number of documents"])
-            # Count documents (not total occurrences)
+            # Count documents (distinct, not total occurrences)
             doc_counts = (
                 exploded.reset_index()
                 .drop_duplicates()
                 .groupby(exploded.name)["index"]
                 .count()
+                .to_dict()
             )
-            counts = Counter(exploded)
+            counts = doc_counts
             result = pd.DataFrame({
                 entity_label: list(counts.keys()),
                 "Number of documents": list(counts.values()),
@@ -1086,7 +1084,7 @@ class OWGroupStatistics(OWWidget):
 
         keys = list(ENTITY_CONFIGS.keys())
         idx = min(self.entity_type_idx, len(keys) - 1)
-        config = ENTITY_CONFIGS[keys[idx]]
+        ENTITY_CONFIGS[keys[idx]]
         default_name = f"group_{keys[idx]}_stats"
 
         fname, filt = QFileDialog.getSaveFileName(
