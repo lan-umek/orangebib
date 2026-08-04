@@ -9,7 +9,7 @@ Bibliometric analysis add-on for Orange data mining suite.
 from setuptools import setup, find_packages
 
 NAME = "Orange3-Biblium"
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 DESCRIPTION = "Bibliometric analysis widgets for Orange (powered by Biblium 2.16+)"
 LONG_DESCRIPTION = """
 Orange3-Biblium (OrangeBib) provides widgets for bibliometric and scientometric
