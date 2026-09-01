@@ -87,12 +87,12 @@ INSTALL_REQUIRES = [
     "pandas>=1.5.0",
     "numpy>=1.21.0",
     "requests>=2.28.0",
-    "biblium>=2.16.0",  # Core analysis engine (required by most widgets)
+    "biblium>=2.16.1",  # Core analysis engine (required by most widgets)
 ]
 
 EXTRAS_REQUIRE = {
     "full": [
-        "biblium>=2.16.0",
+        "biblium>=2.16.1",
     ],
 }
 
